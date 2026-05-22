@@ -113,21 +113,22 @@ async function generateImage(prompt) {
       prompt: prompt,
       n: 1,
       size: '1024x1024',
-      quality: 'standard',
-      response_format: 'url'
+      quality: 'standard'
     }
   );
   if (!result.data || !result.data[0]) {
     throw new Error('OpenAI error: ' + JSON.stringify(result).substring(0, 300));
   }
-  return result.data[0].url;
+  const item = result.data[0];
+  if (item.url) return item.url;
+  if (item.b64_json) return 'data:image/png;base64,' + item.b64_json;
+  throw new Error('OpenAI вернул неожиданный формат');
 }
 
-// === CLOUDINARY: загрузка картинки по URL ===
+// === CLOUDINARY: загрузка картинки по URL или data URI ===
 async function uploadToCloudinary(imageUrl) {
   if (!CLOUDINARY_CLOUD_NAME || !CLOUDINARY_API_KEY || !CLOUDINARY_API_SECRET) return imageUrl;
   const timestamp = Math.floor(Date.now() / 1000);
-  // Подпись: сортированные параметры (кроме file, api_key, signature) + api_secret через SHA1
   const stringToSign = `timestamp=${timestamp}${CLOUDINARY_API_SECRET}`;
   const signature = crypto.createHash('sha1').update(stringToSign).digest('hex');
   const body = `file=${encodeURIComponent(imageUrl)}&api_key=${CLOUDINARY_API_KEY}&timestamp=${timestamp}&signature=${signature}`;
@@ -142,16 +143,25 @@ async function uploadToCloudinary(imageUrl) {
 }
 
 // === TELEGRAM ===
-async function notify(text) {
+async function notify(text, useMarkdown) {
   if (!TG_BOT_TOKEN || !TG_ADMIN_ID) return;
-  await apiRequest('api.telegram.org', `/bot${TG_BOT_TOKEN}/sendMessage`, 'POST', {},
-    { chat_id: TG_ADMIN_ID, text: text, parse_mode: 'Markdown', disable_web_page_preview: true });
+  const payload = { chat_id: TG_ADMIN_ID, text: text, disable_web_page_preview: true };
+  if (useMarkdown !== false) payload.parse_mode = 'Markdown';
+  const res = await apiRequest('api.telegram.org', `/bot${TG_BOT_TOKEN}/sendMessage`, 'POST', {}, payload);
+  if (res && res.ok === false && useMarkdown !== false) {
+    delete payload.parse_mode;
+    await apiRequest('api.telegram.org', `/bot${TG_BOT_TOKEN}/sendMessage`, 'POST', {}, payload);
+  }
 }
 
 async function notifyPhoto(imageUrl, caption) {
   if (!TG_BOT_TOKEN || !TG_ADMIN_ID || !imageUrl) return;
-  await apiRequest('api.telegram.org', `/bot${TG_BOT_TOKEN}/sendPhoto`, 'POST', {},
-    { chat_id: TG_ADMIN_ID, photo: imageUrl, caption: caption || '', parse_mode: 'Markdown' });
+  const payload = { chat_id: TG_ADMIN_ID, photo: imageUrl, caption: caption || '', parse_mode: 'Markdown' };
+  const res = await apiRequest('api.telegram.org', `/bot${TG_BOT_TOKEN}/sendPhoto`, 'POST', {}, payload);
+  if (res && res.ok === false) {
+    delete payload.parse_mode;
+    await apiRequest('api.telegram.org', `/bot${TG_BOT_TOKEN}/sendPhoto`, 'POST', {}, payload);
+  }
 }
 
 // === ОСНОВНАЯ ЛОГИКА ===
@@ -181,22 +191,22 @@ async function processPost(planEntry) {
   const title = getProp(planEntry.properties, 'Пост');
   console.log('Обрабатываю:', title);
   if (!title) { console.log('У записи нет названия'); return null; }
-  
+
   const post = await findPostByTitle(title);
   if (!post) {
-    await notify(`⚠️ Нет карточки в Постах: *${title}*\n\nСоздай её вручную и запусти бот снова.`);
+    await notify(`Нет карточки в Постах: ${title}. Создай её вручную и запусти бот снова.`, false);
     return null;
   }
-  
+
   const props = post.properties;
   let framework = getProp(props, 'Каркас (ChatGPT)') || getProp(props, 'Каркас');
   let tgText = getProp(props, 'TG-текст');
   let imageUrl = getProp(props, 'Картинка') || getProp(props, 'URL');
-  
+
   const updates = {};
   const workDone = [];
   let finalImageUrl = imageUrl;
-  
+
   // ШАГ 1: каркас
   if (!framework || framework.length < 100) {
     console.log('  → генерирую каркас...');
@@ -205,7 +215,7 @@ async function processPost(planEntry) {
     updates[frameworkField] = richText(framework);
     workDone.push('каркас');
   }
-  
+
   // ШАГ 2: упаковка
   if (!tgText || tgText.length < 100) {
     console.log('  → упаковываю в форматы...');
@@ -214,90 +224,4 @@ async function processPost(planEntry) {
     const dzenMatch = packed.match(/=== DZEN ===\s*([\s\S]*?)(?:=== VK|===|$)/);
     const vkMatch = packed.match(/=== VK ===\s*([\s\S]*?)$/);
     if (tgMatch) updates['TG-текст'] = richText(tgMatch[1].trim());
-    if (dzenMatch) updates['Dzen-текст'] = richText(dzenMatch[1].trim());
-    if (vkMatch) updates['VK-текст'] = richText(vkMatch[1].trim());
-    workDone.push('тексты');
-  }
-  
-  // ШАГ 3: картинка
-  if (!imageUrl && OPENAI_API_KEY) {
-    try {
-      console.log('  → генерирую промпт для картинки...');
-      const imagePrompt = await claude(
-        `На основе библейско-психологической темы "${title}" составь КОРОТКИЙ английский промпт для DALL-E 3 (1-2 предложения, максимум 60 слов). Стиль: ${IMAGE_STYLE}. Без текста и надписей на картинке. Только сильный визуальный образ-метафора. Верни ТОЛЬКО сам промпт, без объяснений.`,
-        300, 'claude-haiku-4-5-20251001'
-      );
-      console.log('  → промпт картинки:', imagePrompt);
-      
-      console.log('  → генерирую картинку через DALL-E...');
-      const dalleUrl = await generateImage(imagePrompt);
-      
-      console.log('  → загружаю в Cloudinary...');
-      finalImageUrl = await uploadToCloudinary(dalleUrl);
-      
-      // Поле может называться "Картинка" или "URL"
-      const imageField = props['Картинка'] ? 'Картинка' : (props['URL'] ? 'URL' : null);
-      if (imageField) updates[imageField] = urlProp(finalImageUrl);
-      workDone.push('картинка');
-    } catch (e) {
-      console.error('  → ошибка генерации картинки:', e.message);
-      await notify(`⚠️ Не удалось сгенерировать картинку для *${title}*: ${e.message}`);
-    }
-  }
-  
-  if (Object.keys(updates).length > 0) {
-    await updatePage(post.id, updates);
-    const postUrl = `https://www.notion.so/${post.id.replace(/-/g, '')}`;
-    const message = `✅ *${title}*\n\nСгенерировал: ${workDone.join(', ')}\n\n[Открыть в Notion](${postUrl})\n\nПроверь и поставь статус Утверждено.`;
-    
-    if (finalImageUrl && workDone.includes('картинка')) {
-      await notifyPhoto(finalImageUrl, message);
-    } else {
-      await notify(message);
-    }
-    return title;
-  }
-  console.log('  → уже всё готово');
-  return null;
-}
-
-async function runDaily() {
-  console.log('\n=== Цикл генерации:', new Date().toISOString(), '===');
-  try {
-    const planned = await findTodayPlanned();
-    console.log('На сегодня запланировано:', planned.length);
-    if (planned.length === 0) return;
-    for (const entry of planned) {
-      try { await processPost(entry); }
-      catch (e) {
-        console.error('Ошибка обработки:', e.message);
-        await notify(`⚠️ Ошибка: ${e.message}`);
-      }
-    }
-  } catch (e) {
-    console.error('Ошибка цикла:', e.message);
-    await notify(`⚠️ *Ошибка цикла*\n\n${e.message}`);
-  }
-}
-
-// === ПЛАНИРОВЩИК ===
-let lastRunDate = null;
-function checkAndRun() {
-  const now = new Date();
-  const msk = new Date(now.getTime() + (3 * 60 - now.getTimezoneOffset()) * 60000);
-  const currentHour = msk.getUTCHours();
-  const dateKey = msk.toISOString().substring(0, 10);
-  if (currentHour === RUN_HOUR_MSK && lastRunDate !== dateKey) {
-    lastRunDate = dateKey;
-    console.log('Запуск ежедневного цикла, МСК:', msk.toISOString());
-    runDaily();
-  }
-}
-setInterval(checkAndRun, 5 * 60 * 1000);
-checkAndRun();
-
-// === HEALTHCHECK ===
-http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Perevodchiki bot is alive. Next run: ' + RUN_HOUR_MSK + ':00 MSK\n');
-}).listen(process.env.PORT || 3000);
+    if (dzenMatch) updates['D
