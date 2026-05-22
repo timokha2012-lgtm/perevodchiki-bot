@@ -209,7 +209,7 @@ async function processPost(planEntry) {
 
   // ШАГ 1: каркас
   if (!framework || framework.length < 100) {
-    console.log('  → генерирую каркас...');
+    console.log('  -> генерирую каркас...');
     framework = await claude(`${FRAMEWORK_PROMPT}\n\nТЕМА: ${title}`, 3000);
     const frameworkField = props['Каркас (ChatGPT)'] ? 'Каркас (ChatGPT)' : 'Каркас';
     updates[frameworkField] = richText(framework);
@@ -218,10 +218,95 @@ async function processPost(planEntry) {
 
   // ШАГ 2: упаковка
   if (!tgText || tgText.length < 100) {
-    console.log('  → упаковываю в форматы...');
+    console.log('  -> упаковываю в форматы...');
     const packed = await claude(`${PACKAGER_PROMPT}\n\nКАРКАС:\n${framework}`, 4000);
     const tgMatch = packed.match(/=== TELEGRAM ===\s*([\s\S]*?)(?:=== DZEN|===|$)/);
     const dzenMatch = packed.match(/=== DZEN ===\s*([\s\S]*?)(?:=== VK|===|$)/);
     const vkMatch = packed.match(/=== VK ===\s*([\s\S]*?)$/);
     if (tgMatch) updates['TG-текст'] = richText(tgMatch[1].trim());
-    if (dzenMatch) updates['D
+    if (dzenMatch) updates['Dzen-текст'] = richText(dzenMatch[1].trim());
+    if (vkMatch) updates['VK-текст'] = richText(vkMatch[1].trim());
+    workDone.push('тексты');
+  }
+
+  // ШАГ 3: картинка
+  if (!imageUrl && OPENAI_API_KEY) {
+    try {
+      console.log('  -> генерирую промпт для картинки...');
+      const imagePrompt = await claude(
+        `На основе библейско-психологической темы "${title}" составь КОРОТКИЙ английский промпт для DALL-E 3 (1-2 предложения, максимум 60 слов). Стиль: ${IMAGE_STYLE}. Без текста и надписей на картинке. Только сильный визуальный образ-метафора. Верни ТОЛЬКО сам промпт, без объяснений.`,
+        300, 'claude-haiku-4-5-20251001'
+      );
+      console.log('  -> промпт картинки:', imagePrompt);
+
+      console.log('  -> генерирую картинку через DALL-E...');
+      const dalleUrl = await generateImage(imagePrompt);
+
+      console.log('  -> загружаю в Cloudinary...');
+      finalImageUrl = await uploadToCloudinary(dalleUrl);
+
+      const imageField = props['Картинка'] ? 'Картинка' : (props['URL'] ? 'URL' : null);
+      if (imageField) updates[imageField] = urlProp(finalImageUrl);
+      workDone.push('картинка');
+    } catch (e) {
+      console.error('  -> ошибка генерации картинки:', e.message);
+      await notify(`Не удалось сгенерировать картинку для "${title}": ${e.message}`, false);
+    }
+  }
+
+  if (Object.keys(updates).length > 0) {
+    await updatePage(post.id, updates);
+    const postUrl = `https://www.notion.so/${post.id.replace(/-/g, '')}`;
+    const message = `✅ *${title}*\n\nСгенерировал: ${workDone.join(', ')}\n\n[Открыть в Notion](${postUrl})\n\nПроверь и поставь статус Утверждено.`;
+
+    if (finalImageUrl && workDone.includes('картинка')) {
+      await notifyPhoto(finalImageUrl, message);
+    } else {
+      await notify(message);
+    }
+    return title;
+  }
+  console.log('  -> уже всё готово');
+  return null;
+}
+
+async function runDaily() {
+  console.log('\n=== Цикл генерации:', new Date().toISOString(), '===');
+  try {
+    const planned = await findTodayPlanned();
+    console.log('На сегодня запланировано:', planned.length);
+    if (planned.length === 0) return;
+    for (const entry of planned) {
+      try { await processPost(entry); }
+      catch (e) {
+        console.error('Ошибка обработки:', e.message);
+        await notify(`Ошибка обработки поста: ${e.message}`, false);
+      }
+    }
+  } catch (e) {
+    console.error('Ошибка цикла:', e.message);
+    await notify(`Ошибка цикла: ${e.message}`, false);
+  }
+}
+
+// === ПЛАНИРОВЩИК ===
+let lastRunDate = null;
+function checkAndRun() {
+  const now = new Date();
+  const msk = new Date(now.getTime() + (3 * 60 - now.getTimezoneOffset()) * 60000);
+  const currentHour = msk.getUTCHours();
+  const dateKey = msk.toISOString().substring(0, 10);
+  if (currentHour === RUN_HOUR_MSK && lastRunDate !== dateKey) {
+    lastRunDate = dateKey;
+    console.log('Запуск ежедневного цикла, МСК:', msk.toISOString());
+    runDaily();
+  }
+}
+setInterval(checkAndRun, 5 * 60 * 1000);
+checkAndRun();
+
+// === HEALTHCHECK ===
+http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('Perevodchiki bot is alive. Next run: ' + RUN_HOUR_MSK + ':00 MSK\n');
+}).listen(process.env.PORT || 3000);
