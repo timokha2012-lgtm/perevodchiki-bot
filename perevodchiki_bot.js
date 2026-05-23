@@ -20,6 +20,7 @@ const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET;
 const IMAGE_STYLE = process.env.IMAGE_STYLE || 'minimalist symbolic illustration, dark background, single strong metaphor, no text, cinematic light, christian psychology theme';
 const VK_TOKEN = process.env.VK_TOKEN;
 const VK_GROUP_ID = process.env.VK_GROUP_ID;
+const VK_ALBUM_ID = process.env.VK_ALBUM_ID;
 const VK_API_VERSION = '5.199';
 
 console.log('=== Переводчики сердца: бот запущен ===');
@@ -223,30 +224,49 @@ async function vkPublish(text, imageUrl) {
   if (!VK_TOKEN || !VK_GROUP_ID) throw new Error('VK не настроен (нет VK_TOKEN или VK_GROUP_ID)');
 
   let attachment = null;
+  let messageText = text || '';
+
   if (imageUrl) {
-    console.log('    VK: получаю upload server...');
-    const uploadServer = await vkCall('photos.getWallUploadServer', { group_id: VK_GROUP_ID });
-    console.log('    VK: скачиваю картинку с Cloudinary...');
-    const imageBuffer = await downloadBuffer(imageUrl);
-    console.log('    VK: загружаю картинку на VK (' + imageBuffer.length + ' байт)...');
-    const uploaded = await uploadMultipart(uploadServer.upload_url, 'photo', 'image.jpg', imageBuffer, 'image/jpeg');
-    if (uploaded.error) throw new Error('VK upload error: ' + JSON.stringify(uploaded));
-    console.log('    VK: сохраняю фото на стене...');
-    const saved = await vkCall('photos.saveWallPhoto', {
-      group_id: VK_GROUP_ID,
-      photo: uploaded.photo,
-      server: uploaded.server,
-      hash: uploaded.hash
-    });
-    if (!saved || !saved[0]) throw new Error('VK saveWallPhoto: пустой ответ');
-    attachment = `photo${saved[0].owner_id}_${saved[0].id}`;
+    // Если есть VK_ALBUM_ID — грузим картинку в альбом сообщества (работает с Community Token)
+    if (VK_ALBUM_ID) {
+      try {
+        console.log('    VK: получаю upload server для альбома', VK_ALBUM_ID, '...');
+        const uploadServer = await vkCall('photos.getUploadServer', {
+          album_id: VK_ALBUM_ID,
+          group_id: VK_GROUP_ID
+        });
+        console.log('    VK: скачиваю картинку с Cloudinary...');
+        const imageBuffer = await downloadBuffer(imageUrl);
+        console.log('    VK: загружаю в альбом (' + imageBuffer.length + ' байт)...');
+        const uploaded = await uploadMultipart(uploadServer.upload_url, 'file1', 'image.jpg', imageBuffer, 'image/jpeg');
+        if (uploaded.error) throw new Error('VK upload: ' + JSON.stringify(uploaded));
+        console.log('    VK: сохраняю фото в альбом...');
+        const saved = await vkCall('photos.save', {
+          album_id: VK_ALBUM_ID,
+          group_id: VK_GROUP_ID,
+          server: uploaded.server,
+          photos_list: uploaded.photos_list,
+          hash: uploaded.hash
+        });
+        if (!saved || !saved[0]) throw new Error('VK photos.save: пустой ответ');
+        attachment = `photo${saved[0].owner_id}_${saved[0].id}`;
+      } catch (e) {
+        console.error('    VK: не удалось загрузить картинку в альбом:', e.message);
+        console.error('    VK: пощу без картинки, добавлю ссылку в конец');
+        messageText += '\n\n' + imageUrl;
+      }
+    } else {
+      // Альбом не настроен — просто прикрепляем URL к концу текста
+      console.log('    VK: VK_ALBUM_ID не задан, картинка идёт ссылкой в тексте');
+      messageText += '\n\n' + imageUrl;
+    }
   }
 
   console.log('    VK: публикую пост...');
   const params = {
     owner_id: '-' + VK_GROUP_ID,
     from_group: 1,
-    message: text || ''
+    message: messageText
   };
   if (attachment) params.attachments = attachment;
   const posted = await vkCall('wall.post', params);
