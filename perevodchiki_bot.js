@@ -325,12 +325,14 @@ async function processPost(planEntry) {
   if (!tgText || tgText.length < 100) {
     console.log('  -> упаковываю в форматы...');
     const packed = await claude(`${PACKAGER_PROMPT}\n\nКАРКАС:\n${framework}`, 4000);
-    const tgMatch = packed.match(/=== TELEGRAM ===\s*([\s\S]*?)(?:=== DZEN|===|$)/);
-    const dzenMatch = packed.match(/=== DZEN ===\s*([\s\S]*?)(?:=== VK|===|$)/);
-    const vkMatch = packed.match(/=== VK ===\s*([\s\S]*?)$/);
+    const tgMatch = packed.match(/=== TELEGRAM ===\s*([\s\S]*?)(?:=== DZEN|=== VK|=== INSTA|===|$)/);
+    const dzenMatch = packed.match(/=== DZEN ===\s*([\s\S]*?)(?:=== VK|=== INSTA|===|$)/);
+    const vkMatch = packed.match(/=== VK ===\s*([\s\S]*?)(?:=== INSTA|===|$)/);
+    const instaMatch = packed.match(/=== INSTA ===\s*([\s\S]*?)$/);
     if (tgMatch) updates['TG-текст'] = richText(tgMatch[1].trim());
     if (dzenMatch) updates['Dzen-текст'] = richText(dzenMatch[1].trim());
     if (vkMatch) updates['VK-текст'] = richText(vkMatch[1].trim());
+    if (instaMatch && props['Insta-карусель']) updates['Insta-карусель'] = richText(instaMatch[1].trim());
     workDone.push('тексты');
   }
 
