@@ -12,6 +12,7 @@ const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
 const TG_ADMIN_ID = process.env.TG_ADMIN_ID;
 const RUN_HOUR_MSK = parseInt(process.env.RUN_HOUR_MSK || '9', 10);
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const OPENAI_IMAGE_MODEL = process.env.OPENAI_IMAGE_MODEL || 'dall-e-2';
 const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME;
 const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY;
 const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET;
@@ -20,6 +21,7 @@ const IMAGE_STYLE = process.env.IMAGE_STYLE || 'minimalist symbolic illustration
 console.log('=== Переводчики сердца: бот запущен ===');
 console.log('Время старта:', new Date().toISOString());
 console.log('Запуск планируется в', RUN_HOUR_MSK + ':00 МСК');
+console.log('Модель картинок:', OPENAI_IMAGE_MODEL);
 
 // === HTTP-ЗАПРОС ===
 function apiRequest(hostname, path, method, headers, body, isForm) {
@@ -102,22 +104,30 @@ async function claude(prompt, maxTokens, model) {
   return result.content.map(c => c.text || '').join('').trim();
 }
 
-// === OPENAI: DALL-E ===
+// === OPENAI: генерация картинки ===
+// Поддерживает: dall-e-2, dall-e-3, gpt-image-1
+// Модель задаётся через переменную окружения OPENAI_IMAGE_MODEL
 async function generateImage(prompt) {
   if (!OPENAI_API_KEY) return null;
+  const body = {
+    model: OPENAI_IMAGE_MODEL,
+    prompt: prompt,
+    n: 1,
+    size: '1024x1024'
+  };
+  // dall-e-3 поддерживает quality: standard/hd
+  if (OPENAI_IMAGE_MODEL === 'dall-e-3') body.quality = 'standard';
+  // gpt-image-1 поддерживает quality: low/medium/high
+  if (OPENAI_IMAGE_MODEL === 'gpt-image-1') body.quality = 'medium';
+  // dall-e-2 не принимает параметр quality
+
   const result = await apiRequest(
     'api.openai.com', '/v1/images/generations', 'POST',
     { 'Authorization': `Bearer ${OPENAI_API_KEY}` },
-    {
-      model: 'dall-e-3',
-      prompt: prompt,
-      n: 1,
-      size: '1024x1024',
-      quality: 'standard'
-    }
+    body
   );
   if (!result.data || !result.data[0]) {
-    throw new Error('OpenAI error: ' + JSON.stringify(result).substring(0, 300));
+    throw new Error('OpenAI error: ' + JSON.stringify(result).substring(0, 400));
   }
   const item = result.data[0];
   if (item.url) return item.url;
@@ -234,16 +244,16 @@ async function processPost(planEntry) {
     try {
       console.log('  -> генерирую промпт для картинки...');
       const imagePrompt = await claude(
-        `На основе библейско-психологической темы "${title}" составь КОРОТКИЙ английский промпт для DALL-E 3 (1-2 предложения, максимум 60 слов). Стиль: ${IMAGE_STYLE}. Без текста и надписей на картинке. Только сильный визуальный образ-метафора. Верни ТОЛЬКО сам промпт, без объяснений.`,
+        `На основе библейско-психологической темы "${title}" составь КОРОТКИЙ английский промпт для генерации картинки (1-2 предложения, максимум 60 слов). Стиль: ${IMAGE_STYLE}. Без текста и надписей на картинке. Только сильный визуальный образ-метафора. Верни ТОЛЬКО сам промпт, без объяснений.`,
         300, 'claude-haiku-4-5-20251001'
       );
       console.log('  -> промпт картинки:', imagePrompt);
 
-      console.log('  -> генерирую картинку через DALL-E...');
-      const dalleUrl = await generateImage(imagePrompt);
+      console.log('  -> генерирую картинку через', OPENAI_IMAGE_MODEL, '...');
+      const rawUrl = await generateImage(imagePrompt);
 
       console.log('  -> загружаю в Cloudinary...');
-      finalImageUrl = await uploadToCloudinary(dalleUrl);
+      finalImageUrl = await uploadToCloudinary(rawUrl);
 
       const imageField = props['Картинка'] ? 'Картинка' : (props['URL'] ? 'URL' : null);
       if (imageField) updates[imageField] = urlProp(finalImageUrl);
@@ -308,5 +318,5 @@ checkAndRun();
 // === HEALTHCHECK ===
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Perevodchiki bot is alive. Next run: ' + RUN_HOUR_MSK + ':00 MSK\n');
+  res.end('Perevodchiki bot is alive. Next run: ' + RUN_HOUR_MSK + ':00 MSK. Image model: ' + OPENAI_IMAGE_MODEL + '\n');
 }).listen(process.env.PORT || 3000);
