@@ -368,10 +368,10 @@ async function runDaily() {
 
 // === ЦИКЛ ПУБЛИКАЦИИ В VK ===
 async function findApprovedForVK() {
-  const result = await queryDatabase(POSTS_DB, {});
+  const result = await queryDatabase(POSTS_DB);
   if (!result.results) throw new Error('Posts: ' + JSON.stringify(result).substring(0, 200));
   return result.results.filter(post => {
-    const status = getProp(post.properties, 'Статус') || '';
+    const status = (getProp(post.properties, 'Статус') || '').toString();
     const vkPublished = !!(post.properties['VK'] && post.properties['VK'].checkbox);
     const hasText = !!getProp(post.properties, 'VK-текст');
     return (status.toLowerCase() === 'утверждено') && !vkPublished && hasText;
