@@ -1,93 +1,453 @@
-// === ПРОМПТЫ CLAUDE ДЛЯ ПЕРЕВОДЧИКОВ СЕРДЦА ===
+const https = require('https');
+const http = require('http');
+const crypto = require('crypto');
+const { URL } = require('url');
+const { FRAMEWORK_PROMPT, PACKAGER_PROMPT } = require('./prompts');
 
-const FRAMEWORK_PROMPT = `Ты — главный смысловой редактор серии «Переводчики сердца» и других христианско-психологических серий автора.
+// === ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ===
+const NOTION_TOKEN = process.env.NOTION_TOKEN;
+const CONTENT_PLAN_DB = process.env.NOTION_DATABASE_ID;
+const POSTS_DB = process.env.POSTS_DATABASE_ID;
+const ANTHROPIC_KEY = process.env.ANTHROPIC_KEY;
+const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
+const TG_ADMIN_ID = process.env.TG_ADMIN_ID;
+const RUN_HOUR_MSK = parseInt(process.env.RUN_HOUR_MSK || '9', 10);
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const OPENAI_IMAGE_MODEL = process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1';
+const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME;
+const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY;
+const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET;
+const IMAGE_STYLE = process.env.IMAGE_STYLE || 'minimalist symbolic illustration, dark background, single strong metaphor, no text, cinematic light, christian psychology theme';
+const VK_TOKEN = process.env.VK_TOKEN;
+const VK_USER_TOKEN = process.env.VK_USER_TOKEN;
+const VK_GROUP_ID = process.env.VK_GROUP_ID;
+const VK_ALBUM_ID = process.env.VK_ALBUM_ID;
+const VK_API_VERSION = '5.199';
 
-Автор — Дмитрий Петров: психолог-диакон, специалист по зависимостям и душепопечитель. Работает с зависимыми, созависимыми, верующими в кризисе. Контент должен мотивировать читателя обратиться за помощью.
+console.log('=== Переводчики сердца: бот запущен ===');
+console.log('Время старта:', new Date().toISOString());
+console.log('Генерация в', RUN_HOUR_MSK + ':00 МСК');
+console.log('Модель картинок:', OPENAI_IMAGE_MODEL);
+console.log('VK подключён:', !!VK_TOKEN && !!VK_GROUP_ID);
+console.log('VK User Token (для фоток):', !!VK_USER_TOKEN);
 
-Твоя двойная экспертиза:
-— магистр богословия со знанием христианской, иудейской и исламской традиций;
-— клинический психолог с глубоким знанием психоанализа, КПТ, гештальт-подхода, экзистенциальной психологии.
+// === HTTP-ЗАПРОС ===
+function apiRequest(hostname, path, method, headers, body, isForm) {
+  return new Promise((resolve, reject) => {
+    let bodyStr = null;
+    const reqHeaders = Object.assign({}, headers || {});
+    if (body !== undefined && body !== null) {
+      if (isForm) {
+        bodyStr = body;
+        reqHeaders['Content-Type'] = 'application/x-www-form-urlencoded';
+      } else {
+        bodyStr = JSON.stringify(body);
+        reqHeaders['Content-Type'] = 'application/json';
+      }
+      reqHeaders['Content-Length'] = Buffer.byteLength(bodyStr);
+    }
+    const req = https.request({ hostname, path, method, headers: reqHeaders }, res => {
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => {
+        try { resolve(JSON.parse(data)); }
+        catch (e) { resolve({ error: 'parse_error', raw: data, status: res.statusCode }); }
+      });
+    });
+    req.on('error', reject);
+    if (bodyStr) req.write(bodyStr);
+    req.end();
+  });
+}
 
-ЗАДАЧА: На основе ТЕМЫ автора построй смысловой каркас по шаблону:
+// === NOTION ===
+const NOTION_HEADERS = {
+  'Authorization': `Bearer ${NOTION_TOKEN}`,
+  'Notion-Version': '2022-06-28'
+};
 
-1. БИБЛЕЙСКИЙ ТЕКСТ (точная ссылка + синодальная цитата)
-2. БОГОСЛОВСКАЯ МЫСЛЬ (1-2 абзаца без проповеднической патоки)
-3. ПСИХОЛОГИЧЕСКИЙ МЕХАНИЗМ (точный термин: проекция, расщепление, hostile attribution bias и т.д.)
-4. ТОЧКА ПЕРЕСЕЧЕНИЯ (мост между богословием и психологией)
-5. ХУК (одно предложение, цепляющее за горло, никаких клише)
-6. ГЛАВНАЯ МЫСЛЬ (3-5 предложений сути)
-7. ТОЧКА БОЛИ (конкретное место, в котором читатель должен узнать себя — реальная ситуация из жизни)
-8. ВЫВОД/CTA (конкретный шаг для читателя)
+async function queryDatabase(dbId, filter) {
+  const body = filter ? { filter } : {};
+  body.page_size = 100;
+  return apiRequest('api.notion.com', `/v1/databases/${dbId}/query`, 'POST', NOTION_HEADERS, body);
+}
 
-ПРАВИЛА:
-— Никаких клише ("в современном мире", "давайте задумаемся")
-— Метафоры из литературы, кино, культуры приветствуются
-— Если тема слабая — предложи усиление
-— Подкрепляй богословие святоотеческой традицией и психологию конкретными авторами где уместно
-— ТОЧКА БОЛИ должна быть узнаваемой: "ты лежишь в три ночи, листаешь ленту и понимаешь...", а не общее "многие из нас сталкиваются..."
+async function updatePage(pageId, properties) {
+  return apiRequest('api.notion.com', `/v1/pages/${pageId}`, 'PATCH', NOTION_HEADERS, { properties });
+}
 
-ФОРМАТ ОТВЕТА: строго по шаблону выше, без вступлений. Разделители между пунктами — пустая строка.`;
+function getProp(props, name) {
+  const p = props[name];
+  if (!p) return null;
+  if (p.title && p.title.length) return p.title.map(t => t.plain_text).join('');
+  if (p.rich_text && p.rich_text.length) return p.rich_text.map(t => t.plain_text).join('');
+  if (p.select) return p.select.name;
+  if (p.status) return p.status.name;
+  if (p.date) return p.date.start;
+  if (p.url) return p.url;
+  if (typeof p.checkbox === 'boolean') return p.checkbox;
+  return null;
+}
 
-const PACKAGER_PROMPT = `Ты — упаковщик контента. НЕ автор. НЕ редактор смысла.
+function richText(text) {
+  if (!text) return { rich_text: [] };
+  const chunks = [];
+  for (let i = 0; i < text.length; i += 1900) {
+    chunks.push({ type: 'text', text: { content: text.substring(i, i + 1900) } });
+  }
+  return { rich_text: chunks };
+}
 
-Твоя задача: брать готовый смысловой каркас и адаптировать его под Telegram, Dzen, VK и Instagram-карусель, НЕ МЕНЯЯ богословский и психологический смысл.
+function urlProp(url) { return { url: url || null }; }
+function checkboxProp(value) { return { checkbox: !!value }; }
 
-КОНТЕКСТ АВТОРА И КОНТАКТЫ:
-Автор — Дмитрий Петров, психолог-диакон, специалист по зависимостям и душепопечитель.
+// === CLAUDE ===
+async function claude(prompt, maxTokens, model) {
+  const result = await apiRequest(
+    'api.anthropic.com', '/v1/messages', 'POST',
+    { 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01' },
+    { model: model || 'claude-sonnet-4-20250514', max_tokens: maxTokens || 2000, messages: [{ role: 'user', content: prompt }] }
+  );
+  if (!result.content) throw new Error('Claude error: ' + JSON.stringify(result).substring(0, 300));
+  return result.content.map(c => c.text || '').join('').trim();
+}
 
-Личные контакты для CTA (направляем читателей в личку каждой платформы):
-— Telegram личка: @SONGOD62
-— VK: личка автора — vk.com/putpreo
-— Instagram директ: @petrov.reab
+// === OPENAI: генерация картинки ===
+async function generateImage(prompt) {
+  if (!OPENAI_API_KEY) return null;
+  const body = { model: OPENAI_IMAGE_MODEL, prompt: prompt, n: 1, size: '1024x1024' };
+  if (OPENAI_IMAGE_MODEL === 'dall-e-3') body.quality = 'standard';
+  if (OPENAI_IMAGE_MODEL === 'gpt-image-1') body.quality = 'medium';
+  const result = await apiRequest(
+    'api.openai.com', '/v1/images/generations', 'POST',
+    { 'Authorization': `Bearer ${OPENAI_API_KEY}` }, body
+  );
+  if (!result.data || !result.data[0]) throw new Error('OpenAI error: ' + JSON.stringify(result).substring(0, 400));
+  const item = result.data[0];
+  if (item.url) return item.url;
+  if (item.b64_json) return 'data:image/png;base64,' + item.b64_json;
+  throw new Error('OpenAI вернул неожиданный формат');
+}
 
-Дополнительный опциональный путь (для тех, кто не готов сразу в личку — пусть пройдут диагностический тест):
-— Telegram-бот @dusha_popechitel (короткий опросник из 5 вопросов + персональный разбор + бесплатная 30-минутная сессия)
+// === CLOUDINARY ===
+async function uploadToCloudinary(imageUrl) {
+  if (!CLOUDINARY_CLOUD_NAME || !CLOUDINARY_API_KEY || !CLOUDINARY_API_SECRET) return imageUrl;
+  const timestamp = Math.floor(Date.now() / 1000);
+  const stringToSign = `timestamp=${timestamp}${CLOUDINARY_API_SECRET}`;
+  const signature = crypto.createHash('sha1').update(stringToSign).digest('hex');
+  const body = `file=${encodeURIComponent(imageUrl)}&api_key=${CLOUDINARY_API_KEY}&timestamp=${timestamp}&signature=${signature}`;
+  const result = await apiRequest('api.cloudinary.com', `/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`, 'POST', {}, body, true);
+  if (!result.secure_url) throw new Error('Cloudinary error: ' + JSON.stringify(result).substring(0, 300));
+  return result.secure_url;
+}
 
-Каждый пост должен завершаться CTA, который ведёт через БОЛЬ → к личному контакту платформы (или опционально к боту-тесту).
+// === TELEGRAM ===
+async function notify(text, useMarkdown) {
+  if (!TG_BOT_TOKEN || !TG_ADMIN_ID) return;
+  const payload = { chat_id: TG_ADMIN_ID, text: text, disable_web_page_preview: true };
+  if (useMarkdown !== false) payload.parse_mode = 'Markdown';
+  const res = await apiRequest('api.telegram.org', `/bot${TG_BOT_TOKEN}/sendMessage`, 'POST', {}, payload);
+  if (res && res.ok === false && useMarkdown !== false) {
+    delete payload.parse_mode;
+    await apiRequest('api.telegram.org', `/bot${TG_BOT_TOKEN}/sendMessage`, 'POST', {}, payload);
+  }
+}
 
-ВХОД: смысловой каркас (Писание + богословие + психология + хук + точка боли + вывод).
-ВЫХОД — четыре блока:
+async function notifyPhoto(imageUrl, caption) {
+  if (!TG_BOT_TOKEN || !TG_ADMIN_ID || !imageUrl) return;
+  const payload = { chat_id: TG_ADMIN_ID, photo: imageUrl, caption: caption || '', parse_mode: 'Markdown' };
+  const res = await apiRequest('api.telegram.org', `/bot${TG_BOT_TOKEN}/sendPhoto`, 'POST', {}, payload);
+  if (res && res.ok === false) {
+    delete payload.parse_mode;
+    await apiRequest('api.telegram.org', `/bot${TG_BOT_TOKEN}/sendPhoto`, 'POST', {}, payload);
+  }
+}
 
-=== TELEGRAM ===
-800-1500 знаков. Сильный первый абзац (хук). Развёртывание короткими абзацами по 2-4 строки. Цитата Писания на своём месте.
-CTA в конце (короткий, личный): "Если узнал себя — не молчи. Напиши мне @SONGOD62 — поговорим."
+// === VK ПУБЛИКАЦИЯ ===
+function downloadBuffer(urlString) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(urlString);
+    https.get({ hostname: u.hostname, path: u.pathname + u.search }, res => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        return downloadBuffer(res.headers.location).then(resolve, reject);
+      }
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => resolve(Buffer.concat(chunks)));
+    }).on('error', reject);
+  });
+}
 
-=== DZEN ===
-3000-5000 знаков. Первая строка — SEO-заголовок. Подзаголовок. Развёрнутая статья с подзаголовками H2.
-В конце — РАЗВЁРНУТЫЙ CTA через боль:
-1. Болевой абзац: назови точку боли из каркаса прямо. "Если ты сейчас узнал себя — это не случайно. Эту тяжесть не нужно тянуть одному."
-2. Личное представление: "Я — Дмитрий Петров, психолог-диакон. 15 лет работаю с теми, кто застрял в этой ловушке."
-3. Конкретное предложение: "Я провожу БЕСПЛАТНУЮ 30-минутную онлайн-сессию. Без обязательств. Просто разговор о том, что у тебя сейчас."
-4. Контакты по платформам: "Напиши мне напрямую — в Telegram @SONGOD62, в Instagram директ @petrov.reab, или в VK в личку vk.com/putpreo."
-5. Опция для тех, кто пока не готов: "Если в личку идти страшно — пройди короткий тест в Telegram-боте @dusha_popechitel. За 5 минут узнаешь свою психологическую роль."
+function uploadMultipart(uploadUrlString, fieldName, filename, buffer, mimeType) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(uploadUrlString);
+    const boundary = '----PerevodchikiFormBoundary' + Date.now();
+    const preamble = Buffer.from(
+      `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="${fieldName}"; filename="${filename}"\r\n` +
+      `Content-Type: ${mimeType}\r\n\r\n`
+    );
+    const epilogue = Buffer.from(`\r\n--${boundary}--\r\n`);
+    const body = Buffer.concat([preamble, buffer, epilogue]);
+    const req = https.request({
+      hostname: u.hostname,
+      path: u.pathname + u.search,
+      method: 'POST',
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': body.length
+      }
+    }, res => {
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => {
+        try { resolve(JSON.parse(data)); }
+        catch (e) { resolve({ error: 'parse', raw: data }); }
+      });
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
 
-=== VK ===
-600-1200 знаков. Адаптация под VK — чуть развёрнутее TG, чуть менее эмоционально. С вопросом в конце.
-CTA в конце: назови боль, дай выход. "Если узнал — не молчи. Напиши мне в личку — vk.com/putpreo — отвечу лично."
+async function vkCall(method, params, useUserToken) {
+  const token = useUserToken && VK_USER_TOKEN ? VK_USER_TOKEN : VK_TOKEN;
+  const allParams = Object.assign({}, params, {
+    access_token: token,
+    v: VK_API_VERSION
+  });
+  const body = Object.entries(allParams).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
+  const result = await apiRequest('api.vk.com', `/method/${method}`, 'POST', {}, body, true);
+  if (result.error) throw new Error('VK error in ' + method + ': ' + JSON.stringify(result.error).substring(0, 300));
+  return result.response;
+}
 
-=== INSTA ===
-Сценарий карусели из 8-10 слайдов. Формат:
-SLIDE 1 (обложка, цепляет в первые 3 секунды): хук крупным текстом, 5-10 слов
-SLIDE 2: разворот темы, 1-2 коротких предложения
-SLIDE 3: библейская сцена / цитата
-SLIDE 4: психологический механизм простыми словами
-SLIDE 5: точка боли (узнаваемая ситуация из жизни)
-SLIDE 6: парадокс / удар (то, чего не ожидают)
-SLIDE 7: вывод / главная мысль
-SLIDE 8 (CTA): "Если узнал себя — напиши мне в директ @petrov.reab. Или пройди тест @dusha_popechitel — узнаешь свою роль."
+async function vkPublish(text, imageUrl) {
+  if (!VK_TOKEN || !VK_GROUP_ID) throw new Error('VK не настроен (нет VK_TOKEN или VK_GROUP_ID)');
 
-На каждом слайде — короткий текст (1-3 предложения максимум), который должен помещаться на квадрат 1080×1080.
-В конце блока добавь: ПОДПИСЬ К КАРУСЕЛИ (caption под постом, до 2200 знаков, с CTA на @petrov.reab в конце).
+  let attachment = null;
+  let messageText = text || '';
 
-ЗАПРЕЩЕНО:
-— Менять богословский смысл
-— Подменять психологические термины на эзотерику
-— Клише: "в современном мире", "давайте задумаемся", "как часто мы", "друзья, согласитесь"
-— Эмодзи в каждом предложении (одно-два на пост максимум)
-— CTA в стиле "купите мой курс" / "запишитесь на консультацию" — это холодно. Используй "напиши мне" / "поговорим".
-— Манипулятивные приёмы давления ("осталось 3 места", "только сегодня")
-— Не путать контакты по платформам: TG → @SONGOD62, IG → @petrov.reab, VK → vk.com/putpreo. Каждый CTA должен направлять в тот канал, где читатель находится.
+  if (imageUrl) {
+    if (VK_USER_TOKEN) {
+      // Грузим фото на стену сообщества через User Token (правильный путь)
+      try {
+        console.log('    VK: получаю wall upload server для группы', VK_GROUP_ID, '...');
+        const uploadServer = await vkCall('photos.getWallUploadServer', {
+          group_id: VK_GROUP_ID
+        }, true);
+        console.log('    VK: скачиваю картинку с Cloudinary...');
+        const imageBuffer = await downloadBuffer(imageUrl);
+        console.log('    VK: загружаю фото (' + imageBuffer.length + ' байт)...');
+        const uploaded = await uploadMultipart(uploadServer.upload_url, 'photo', 'image.jpg', imageBuffer, 'image/jpeg');
+        if (uploaded.error) throw new Error('VK upload: ' + JSON.stringify(uploaded));
+        console.log('    VK: сохраняю фото на стену...');
+        const saved = await vkCall('photos.saveWallPhoto', {
+          group_id: VK_GROUP_ID,
+          server: uploaded.server,
+          photo: uploaded.photo,
+          hash: uploaded.hash
+        }, true);
+        if (!saved || !saved[0]) throw new Error('VK photos.saveWallPhoto: пустой ответ');
+        attachment = `photo${saved[0].owner_id}_${saved[0].id}`;
+        console.log('    VK: attachment =', attachment);
+      } catch (e) {
+        console.error('    VK: не удалось загрузить картинку:', e.message);
+        console.error('    VK: пощу без картинки, добавлю ссылку в конец');
+        messageText += '\n\n' + imageUrl;
+      }
+    } else {
+      // User Token не настроен — фоллбэк на URL в тексте
+      console.log('    VK: VK_USER_TOKEN не задан, картинка идёт ссылкой в тексте');
+      messageText += '\n\n' + imageUrl;
+    }
+  }
 
-ФОРМАТ ОТВЕТА: строго четыре блока с указанными разделителями ===.`;
+  console.log('    VK: публикую пост...');
+  const params = {
+    owner_id: '-' + VK_GROUP_ID,
+    from_group: 1,
+    message: messageText
+  };
+  if (attachment) params.attachments = attachment;
+  const posted = await vkCall('wall.post', params);
+  const postId = posted.post_id;
+  const postUrl = `https://vk.com/wall-${VK_GROUP_ID}_${postId}`;
+  return postUrl;
+}
 
-module.exports = { FRAMEWORK_PROMPT, PACKAGER_PROMPT };
+// === ОСНОВНАЯ ЛОГИКА ГЕНЕРАЦИИ ===
+function today() {
+  const now = new Date();
+  const msk = new Date(now.getTime() + (3 * 60 - now.getTimezoneOffset()) * 60000);
+  return msk.toISOString().substring(0, 10);
+}
+
+async function findTodayPlanned() {
+  const result = await queryDatabase(CONTENT_PLAN_DB, { property: 'Дата', date: { equals: today() } });
+  if (!result.results) throw new Error('Контент-план: ' + JSON.stringify(result).substring(0, 200));
+  return result.results;
+}
+
+async function findPostByTitle(title) {
+  const result = await queryDatabase(POSTS_DB, { property: 'Тема', title: { equals: title } });
+  if (!result.results || result.results.length === 0) return null;
+  return result.results[0];
+}
+
+async function processPost(planEntry) {
+  const title = getProp(planEntry.properties, 'Пост');
+  console.log('Обрабатываю:', title);
+  if (!title) { console.log('У записи нет названия'); return null; }
+
+  const post = await findPostByTitle(title);
+  if (!post) {
+    await notify(`Нет карточки в Постах: ${title}. Создай её вручную.`, false);
+    return null;
+  }
+
+  const props = post.properties;
+  let framework = getProp(props, 'Каркас (ChatGPT)') || getProp(props, 'Каркас');
+  let tgText = getProp(props, 'TG-текст');
+  let imageUrl = getProp(props, 'Картинка') || getProp(props, 'URL');
+
+  const updates = {};
+  const workDone = [];
+  let finalImageUrl = imageUrl;
+
+  if (!framework || framework.length < 100) {
+    console.log('  -> генерирую каркас...');
+    framework = await claude(`${FRAMEWORK_PROMPT}\n\nТЕМА: ${title}`, 3000);
+    const frameworkField = props['Каркас (ChatGPT)'] ? 'Каркас (ChatGPT)' : 'Каркас';
+    updates[frameworkField] = richText(framework);
+    workDone.push('каркас');
+  }
+
+  if (!tgText || tgText.length < 100) {
+    console.log('  -> упаковываю в форматы...');
+    const packed = await claude(`${PACKAGER_PROMPT}\n\nКАРКАС:\n${framework}`, 4000);
+    const tgMatch = packed.match(/=== TELEGRAM ===\s*([\s\S]*?)(?:=== DZEN|=== VK|=== INSTA|===|$)/);
+    const dzenMatch = packed.match(/=== DZEN ===\s*([\s\S]*?)(?:=== VK|=== INSTA|===|$)/);
+    const vkMatch = packed.match(/=== VK ===\s*([\s\S]*?)(?:=== INSTA|===|$)/);
+    const instaMatch = packed.match(/=== INSTA ===\s*([\s\S]*?)$/);
+    if (tgMatch) updates['TG-текст'] = richText(tgMatch[1].trim());
+    if (dzenMatch) updates['Dzen-текст'] = richText(dzenMatch[1].trim());
+    if (vkMatch) updates['VK-текст'] = richText(vkMatch[1].trim());
+    if (instaMatch && props['Insta-карусель']) updates['Insta-карусель'] = richText(instaMatch[1].trim());
+    workDone.push('тексты');
+  }
+
+  if (!imageUrl && OPENAI_API_KEY) {
+    try {
+      console.log('  -> генерирую промпт для картинки...');
+      const imagePrompt = await claude(
+        `На основе библейско-психологической темы "${title}" составь КОРОТКИЙ английский промпт для генерации картинки (1-2 предложения, максимум 60 слов). Стиль: ${IMAGE_STYLE}. Без текста и надписей на картинке. Только сильный визуальный образ-метафора. Верни ТОЛЬКО сам промпт, без объяснений.`,
+        300, 'claude-haiku-4-5-20251001'
+      );
+      console.log('  -> промпт:', imagePrompt);
+      console.log('  -> генерирую картинку через', OPENAI_IMAGE_MODEL, '...');
+      const rawUrl = await generateImage(imagePrompt);
+      console.log('  -> загружаю в Cloudinary...');
+      finalImageUrl = await uploadToCloudinary(rawUrl);
+      const imageField = props['Картинка'] ? 'Картинка' : (props['URL'] ? 'URL' : null);
+      if (imageField) updates[imageField] = urlProp(finalImageUrl);
+      workDone.push('картинка');
+    } catch (e) {
+      console.error('  -> ошибка картинки:', e.message);
+      await notify(`Не удалось сгенерировать картинку для "${title}": ${e.message}`, false);
+    }
+  }
+
+  if (Object.keys(updates).length > 0) {
+    await updatePage(post.id, updates);
+    const postUrl = `https://www.notion.so/${post.id.replace(/-/g, '')}`;
+    const message = `✅ *${title}*\n\nСгенерировал: ${workDone.join(', ')}\n\n[Открыть в Notion](${postUrl})\n\nПроверь и поставь статус Утверждено.`;
+    if (finalImageUrl && workDone.includes('картинка')) await notifyPhoto(finalImageUrl, message);
+    else await notify(message);
+    return title;
+  }
+  console.log('  -> уже всё готово');
+  return null;
+}
+
+async function runDaily() {
+  console.log('\n=== Цикл генерации:', new Date().toISOString(), '===');
+  try {
+    const planned = await findTodayPlanned();
+    console.log('На сегодня запланировано:', planned.length);
+    if (planned.length === 0) return;
+    for (const entry of planned) {
+      try { await processPost(entry); }
+      catch (e) {
+        console.error('Ошибка обработки:', e.message);
+        await notify(`Ошибка обработки поста: ${e.message}`, false);
+      }
+    }
+  } catch (e) {
+    console.error('Ошибка цикла генерации:', e.message);
+    await notify(`Ошибка цикла генерации: ${e.message}`, false);
+  }
+}
+
+// === ЦИКЛ ПУБЛИКАЦИИ В VK ===
+async function findApprovedForVK() {
+  const result = await queryDatabase(POSTS_DB);
+  if (!result.results) throw new Error('Posts: ' + JSON.stringify(result).substring(0, 200));
+  return result.results.filter(post => {
+    const status = (getProp(post.properties, 'Статус') || '').toString();
+    const vkPublished = !!(post.properties['VK'] && post.properties['VK'].checkbox);
+    const hasText = !!getProp(post.properties, 'VK-текст');
+    return (status.toLowerCase() === 'утверждено') && !vkPublished && hasText;
+  });
+}
+
+async function publishVKCycle() {
+  if (!VK_TOKEN || !VK_GROUP_ID) return;
+  console.log('\n=== Цикл публикации VK:', new Date().toISOString(), '===');
+  try {
+    const approved = await findApprovedForVK();
+    console.log('Утверждено для публикации в VK:', approved.length);
+    for (const post of approved) {
+      const title = getProp(post.properties, 'Тема');
+      try {
+        const vkText = getProp(post.properties, 'VK-текст');
+        const imageUrl = getProp(post.properties, 'Картинка') || getProp(post.properties, 'URL');
+        console.log('Публикую в VK:', title);
+        const vkPostUrl = await vkPublish(vkText, imageUrl);
+        await updatePage(post.id, { 'VK': checkboxProp(true) });
+        await notify(`✅ Опубликовано в VK: *${title}*\n\n[Посмотреть пост](${vkPostUrl})`);
+        console.log('Опубликовано:', vkPostUrl);
+      } catch (e) {
+        console.error('Ошибка публикации VK:', e.message);
+        await notify(`Ошибка публикации в VK "${title}": ${e.message}`, false);
+      }
+    }
+  } catch (e) {
+    console.error('Ошибка цикла VK:', e.message);
+  }
+}
+
+// === ПЛАНИРОВЩИК ===
+let lastRunDate = null;
+function checkAndRun() {
+  const now = new Date();
+  const msk = new Date(now.getTime() + (3 * 60 - now.getTimezoneOffset()) * 60000);
+  const currentHour = msk.getUTCHours();
+  const dateKey = msk.toISOString().substring(0, 10);
+  if (currentHour === RUN_HOUR_MSK && lastRunDate !== dateKey) {
+    lastRunDate = dateKey;
+    console.log('Запуск ежедневной генерации, МСК:', msk.toISOString());
+    runDaily();
+  }
+}
+setInterval(checkAndRun, 5 * 60 * 1000);
+setInterval(publishVKCycle, 60 * 60 * 1000); // публикация раз в час
+checkAndRun();
+publishVKCycle(); // и сразу при старте
+
+// === HEALTHCHECK ===
+http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end(`Perevodchiki bot is alive.\nGen at ${RUN_HOUR_MSK}:00 MSK\nImage: ${OPENAI_IMAGE_MODEL}\nVK: ${!!VK_TOKEN && !!VK_GROUP_ID ? 'on' : 'off'}\n`);
+}).listen(process.env.PORT || 3000);
