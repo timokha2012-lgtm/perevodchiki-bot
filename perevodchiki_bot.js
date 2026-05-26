@@ -503,6 +503,24 @@ async function seedThemes() {
   return { statusType, seriesType, results };
 }
 
+// === ОДНОРАЗОВЫЙ ПОСЕВ ПРИ СТАРТЕ (если SEED_NOW=true) ===
+if (process.env.SEED_NOW === 'true') {
+  console.log('\n🌱 SEED_NOW=true обнаружен — запускаю одноразовый посев тем в Notion...');
+  seedThemes()
+    .then(out => {
+      console.log('✅ Посев завершён.');
+      console.log('   Тип Статуса:', out.statusType);
+      console.log('   Тип Серии:', out.seriesType);
+      out.results.forEach(line => console.log('   ' + line));
+      console.log('\n🌱 ВАЖНО: удали переменную SEED_NOW из Railway Variables, иначе посев повторится при каждом рестарте!\n');
+      notify(`✅ Посев Notion завершён.\nСоздано: ${out.results.filter(r => r.startsWith('OK')).length} из ${out.results.length}.\n\nНе забудь удалить переменную SEED_NOW из Railway!`, false);
+    })
+    .catch(e => {
+      console.error('❌ Ошибка посева:', e.message);
+      notify(`Ошибка посева: ${e.message}`, false);
+    });
+}
+
 // === HEALTHCHECK + SEED ENDPOINT ===
 const server = http.createServer(async (req, res) => {
   if (req.url && req.url.startsWith('/seed')) {
