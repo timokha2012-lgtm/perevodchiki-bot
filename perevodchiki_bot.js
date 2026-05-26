@@ -322,8 +322,8 @@ async function processPost(post) {
   if (!tgText || tgText.length < 100) {
     console.log('  -> упаковываю в форматы...');
     const packed = await claude(`${PACKAGER_PROMPT}\n\nКАРКАС:\n${framework}`, 4000);
-    cons    console.log('  -> packed response preview:', packed.substring(0, 300));
-t tgMatch = packed.match(/=== TELEGRAM ===\s*([\s\S]*?)(?:=== DZEN|=== VK|=== INSTA|===|$)/);
+    console.log('  -> packed response preview:', packed.substring(0, 300));
+    const tgMatch = packed.match(/=== TELEGRAM ===\s*([\s\S]*?)(?:=== DZEN|=== VK|=== INSTA|===|$)/);
     const dzenMatch = packed.match(/=== DZEN ===\s*([\s\S]*?)(?:=== VK|=== INSTA|===|$)/);
     const vkMatch = packed.match(/=== VK ===\s*([\s\S]*?)(?:=== INSTA|===|$)/);
     const instaMatch = packed.match(/=== INSTA ===\s*([\s\S]*?)$/);
