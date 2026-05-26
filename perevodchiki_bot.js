@@ -559,3 +559,4 @@ server.on('error', (err) => {
 server.listen(process.env.PORT || 3000, () => {
   console.log('HTTP-сервер слушает порт', process.env.PORT || 3000);
 });
+if (process.env.FORCE_RUN === '1') { runDaily(); }
