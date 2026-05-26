@@ -19,6 +19,7 @@ const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY;
 const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET;
 const IMAGE_STYLE = process.env.IMAGE_STYLE || 'minimalist symbolic illustration, dark background, single strong metaphor, no text, cinematic light, christian psychology theme';
 const VK_TOKEN = process.env.VK_TOKEN;
+const VK_USER_TOKEN = process.env.VK_USER_TOKEN;
 const VK_GROUP_ID = process.env.VK_GROUP_ID;
 const VK_ALBUM_ID = process.env.VK_ALBUM_ID;
 const VK_API_VERSION = '5.199';
@@ -28,6 +29,7 @@ console.log('Время старта:', new Date().toISOString());
 console.log('Генерация в', RUN_HOUR_MSK + ':00 МСК');
 console.log('Модель картинок:', OPENAI_IMAGE_MODEL);
 console.log('VK подключён:', !!VK_TOKEN && !!VK_GROUP_ID);
+console.log('VK User Token (для фоток):', !!VK_USER_TOKEN);
 
 // === HTTP-ЗАПРОС ===
 function apiRequest(hostname, path, method, headers, body, isForm) {
@@ -209,9 +211,10 @@ function uploadMultipart(uploadUrlString, fieldName, filename, buffer, mimeType)
   });
 }
 
-async function vkCall(method, params) {
+async function vkCall(method, params, useUserToken) {
+  const token = useUserToken && VK_USER_TOKEN ? VK_USER_TOKEN : VK_TOKEN;
   const allParams = Object.assign({}, params, {
-    access_token: VK_TOKEN,
+    access_token: token,
     v: VK_API_VERSION
   });
   const body = Object.entries(allParams).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
@@ -227,37 +230,36 @@ async function vkPublish(text, imageUrl) {
   let messageText = text || '';
 
   if (imageUrl) {
-    // Если есть VK_ALBUM_ID — грузим картинку в альбом сообщества (работает с Community Token)
-    if (VK_ALBUM_ID) {
+    if (VK_USER_TOKEN) {
+      // Грузим фото на стену сообщества через User Token (правильный путь)
       try {
-        console.log('    VK: получаю upload server для альбома', VK_ALBUM_ID, '...');
-        const uploadServer = await vkCall('photos.getUploadServer', {
-          album_id: VK_ALBUM_ID,
+        console.log('    VK: получаю wall upload server для группы', VK_GROUP_ID, '...');
+        const uploadServer = await vkCall('photos.getWallUploadServer', {
           group_id: VK_GROUP_ID
-        });
+        }, true);
         console.log('    VK: скачиваю картинку с Cloudinary...');
         const imageBuffer = await downloadBuffer(imageUrl);
-        console.log('    VK: загружаю в альбом (' + imageBuffer.length + ' байт)...');
-        const uploaded = await uploadMultipart(uploadServer.upload_url, 'file1', 'image.jpg', imageBuffer, 'image/jpeg');
+        console.log('    VK: загружаю фото (' + imageBuffer.length + ' байт)...');
+        const uploaded = await uploadMultipart(uploadServer.upload_url, 'photo', 'image.jpg', imageBuffer, 'image/jpeg');
         if (uploaded.error) throw new Error('VK upload: ' + JSON.stringify(uploaded));
-        console.log('    VK: сохраняю фото в альбом...');
-        const saved = await vkCall('photos.save', {
-          album_id: VK_ALBUM_ID,
+        console.log('    VK: сохраняю фото на стену...');
+        const saved = await vkCall('photos.saveWallPhoto', {
           group_id: VK_GROUP_ID,
           server: uploaded.server,
-          photos_list: uploaded.photos_list,
+          photo: uploaded.photo,
           hash: uploaded.hash
-        });
-        if (!saved || !saved[0]) throw new Error('VK photos.save: пустой ответ');
+        }, true);
+        if (!saved || !saved[0]) throw new Error('VK photos.saveWallPhoto: пустой ответ');
         attachment = `photo${saved[0].owner_id}_${saved[0].id}`;
+        console.log('    VK: attachment =', attachment);
       } catch (e) {
-        console.error('    VK: не удалось загрузить картинку в альбом:', e.message);
+        console.error('    VK: не удалось загрузить картинку:', e.message);
         console.error('    VK: пощу без картинки, добавлю ссылку в конец');
         messageText += '\n\n' + imageUrl;
       }
     } else {
-      // Альбом не настроен — просто прикрепляем URL к концу текста
-      console.log('    VK: VK_ALBUM_ID не задан, картинка идёт ссылкой в тексте');
+      // User Token не настроен — фоллбэк на URL в тексте
+      console.log('    VK: VK_USER_TOKEN не задан, картинка идёт ссылкой в тексте');
       messageText += '\n\n' + imageUrl;
     }
   }
@@ -283,27 +285,22 @@ function today() {
 }
 
 async function findTodayPlanned() {
-  const result = await queryDatabase(CONTENT_PLAN_DB, { property: 'Дата', date: { equals: today() } });
-  if (!result.results) throw new Error('Контент-план: ' + JSON.stringify(result).substring(0, 200));
-  return result.results;
+  const todayStr = today();
+  const result = await queryDatabase(POSTS_DB);
+  if (!result.results) throw new Error('Посты: ' + JSON.stringify(result).substring(0, 200));
+  // Фильтруем в памяти: статус=запланировано И дата=сегодня
+  // (так избегаем проблем с типами столбцов Notion — status vs select)
+  return result.results.filter(post => {
+    const status = (getProp(post.properties, 'Статус') || '').toString().toLowerCase();
+    const date = getProp(post.properties, 'Дата публикации');
+    return status === 'запланировано' && date === todayStr;
+  });
 }
 
-async function findPostByTitle(title) {
-  const result = await queryDatabase(POSTS_DB, { property: 'Тема', title: { equals: title } });
-  if (!result.results || result.results.length === 0) return null;
-  return result.results[0];
-}
-
-async function processPost(planEntry) {
-  const title = getProp(planEntry.properties, 'Пост');
+async function processPost(post) {
+  const title = getProp(post.properties, 'Тема');
   console.log('Обрабатываю:', title);
-  if (!title) { console.log('У записи нет названия'); return null; }
-
-  const post = await findPostByTitle(title);
-  if (!post) {
-    await notify(`Нет карточки в Постах: ${title}. Создай её вручную.`, false);
-    return null;
-  }
+  if (!title) { console.log('У поста нет названия (поле Тема)'); return null; }
 
   const props = post.properties;
   let framework = getProp(props, 'Каркас (ChatGPT)') || getProp(props, 'Каркас');
