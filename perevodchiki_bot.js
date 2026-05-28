@@ -357,8 +357,9 @@ async function processPost(post) {
 
   if (Object.keys(updates).length > 0) {
     await updatePage(post.id, updates);
+    await updatePage(post.id, { 'Статус': { select: { name: 'утверждено' } } });
     const postUrl = `https://www.notion.so/${post.id.replace(/-/g, '')}`;
-    const message = `✅ *${title}*\n\nСгенерировал: ${workDone.join(', ')}\n\n[Открыть в Notion](${postUrl})\n\nПроверь и поставь статус Утверждено.`;
+    const message = `✅ *${title}*\n\nСгенерировал: ${workDone.join(', ')}\n\n[Открыть в Notion](${postUrl})`;
     if (finalImageUrl && workDone.includes('картинка')) await notifyPhoto(finalImageUrl, message);
     else await notify(message);
     return title;
