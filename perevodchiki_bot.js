@@ -430,23 +430,18 @@ let lastRunDate = null;
 
 // ── TG ────────────────────────────────────────────────────────────────────
 async function findApprovedForTG() {
-  const result = await queryDatabase(POSTS_DB);
+  const filter = {
+    and: [
+      { property: 'Dzen', checkbox: { equals: true } },
+      { property: 'ТГ готов', checkbox: { equals: false } }
+    ]
+  };
+  const result = await queryDatabase(POSTS_DB, filter);
   if (!result.results) throw new Error('Posts: ' + JSON.stringify(result).substring(0, 200));
-  const all = result.results;
-  const sample = all.slice(0, 3).map(p => {
-    const props = p.properties;
-    return JSON.stringify({
-      dzen: props['Dzen']?.checkbox,
-      tgReady: props['ТГ готов']?.checkbox,
-      hasTgText: !!(props['ТГ-текст']?.rich_text?.length)
-    });
-  });
-  console.log('TG debug sample:', sample.join(', '));
-  return all.filter(post => {
-    const tgReady = post.properties['ТГ готов']?.checkbox;
-    const dzen = post.properties['Dzen']?.checkbox;
+  console.log('TG: Dzen=true, not ready:', result.results.length);
+  return result.results.filter(post => {
     const hasText = post.properties['ТГ-текст']?.rich_text?.length > 0;
-    return dzen && !tgReady && hasText;
+    return hasText;
   });
 }
 
