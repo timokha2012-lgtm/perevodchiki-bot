@@ -433,14 +433,14 @@ async function findApprovedForTG() {
   const filter = {
     and: [
       { property: 'Dzen', checkbox: { equals: true } },
-      { property: 'ТГ готов', checkbox: { equals: false } }
+      { property: 'TG готов', checkbox: { equals: false } }
     ]
   };
   const result = await queryDatabase(POSTS_DB, filter);
   if (!result.results) throw new Error('Posts: ' + JSON.stringify(result).substring(0, 200));
-  console.log('TG: Dzen=true, not ready:', result.results.length);
+  console.log('TG approved count:', result.results.length);
   return result.results.filter(post => {
-    const hasText = post.properties['ТГ-текст']?.rich_text?.length > 0;
+    const hasText = post.properties['TG-текст']?.rich_text?.length > 0;
     return hasText;
   });
 }
