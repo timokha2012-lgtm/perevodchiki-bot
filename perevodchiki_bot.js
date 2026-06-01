@@ -430,6 +430,16 @@ let lastRunDate = null;
 
 // ── TG ────────────────────────────────────────────────────────────────────
 async function findApprovedForTG() {
+  const dzenFilter = { property: 'Dzen', checkbox: { equals: true } };
+  const dzenOnly = await queryDatabase(POSTS_DB, dzenFilter);
+  console.log('Dzen=true total:', dzenOnly.results?.length, 'error:', !dzenOnly.results);
+  if (dzenOnly.results?.length > 0) {
+    const sample = dzenOnly.results[0];
+    console.log('sample props:', JSON.stringify({
+      tgReady: sample.properties['TG готов']?.checkbox,
+      hasTgText: (sample.properties['TG-текст']?.rich_text?.length > 0)
+    }));
+  }
   const filter = {
     and: [
       { property: 'Dzen', checkbox: { equals: true } },
