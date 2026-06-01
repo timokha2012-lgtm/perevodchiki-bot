@@ -433,13 +433,13 @@ async function findApprovedForTG() {
   const result = await queryDatabase(POSTS_DB);
   if (!result.results) throw new Error('Posts: ' + JSON.stringify(result).substring(0, 200));
   return result.results.filter(post => {
-    const status = getProp(post.properties, 'Статус').toString().toLowerCase();
-    const tgReady = post.properties['TG готов']?.checkbox;
+    const tgReady = post.properties['ТГ готов']?.checkbox;
     const dzen = post.properties['Dzen']?.checkbox;
-    const hasText = getProp(post.properties, 'TG-текст');
-    return status === 'утверждено' && dzen && !tgReady && hasText;
+    const hasText = getProp(post.properties, 'ТГ-текст');
+    return dzen && !tgReady && hasText;
   });
 }
+
 
 async function publishTGCycle() {
   console.log('\n=== Цикл публикации TG: ' + new Date().toISOString() + ' ===');
