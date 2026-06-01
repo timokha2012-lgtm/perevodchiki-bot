@@ -427,6 +427,43 @@ async function publishVKCycle() {
 
 // === ПЛАНИРОВЩИК ===
 let lastRunDate = null;
+
+// ── TG ────────────────────────────────────────────────────────────────────
+async function findApprovedForTG() {
+  const result = await queryDatabase(POSTS_DB);
+  if (!result.results) throw new Error('Posts: ' + JSON.stringify(result).substring(0, 200));
+  return result.results.filter(post => {
+    const status = getProp(post.properties, 'Статус').toString().toLowerCase();
+    const tgReady = post.properties['TG готов']?.checkbox;
+    const dzen = post.properties['Dzen']?.checkbox;
+    const hasText = getProp(post.properties, 'TG-текст');
+    return status === 'утверждено' && dzen && !tgReady && hasText;
+  });
+}
+
+async function publishTGCycle() {
+  console.log('\n=== Цикл публикации TG: ' + new Date().toISOString() + ' ===');
+  try {
+    const approved = await findApprovedForTG();
+    console.log('Утверждено для публикации в TG: ' + approved.length);
+    for (const post of approved) {
+      const title = getProp(post.properties, 'Тема');
+      try {
+        const tgText = getProp(post.properties, 'TG-текст');
+        console.log('Публикую в TG: ' + title);
+        await notify(tgText, true);
+        await updatePage(post.id, { 'TG готов': checkboxProp(true) });
+        console.log('Опубликовано в TG: ' + title);
+      } catch (e) {
+        console.error('Ошибка публикации TG: ' + title, e.message);
+        await notify('Ошибка TG: ' + title + ': ' + e.message, false);
+      }
+    }
+  } catch (e) {
+    console.error('Ошибка цикла TG:', e.message);
+  }
+}
+
 function checkAndRun() {
   const now = new Date();
   const msk = new Date(now.getTime() + (3 * 60 - now.getTimezoneOffset()) * 60000);
@@ -440,6 +477,8 @@ function checkAndRun() {
 }
 setInterval(checkAndRun, 5 * 60 * 1000);
 setInterval(publishVKCycle, 60 * 60 * 1000); // публикация раз в час
+setInterval(publishTGCycle, 60 * 60 * 1000);
+publishTGCycle();
 checkAndRun();
 publishVKCycle(); // и сразу при старте
 
