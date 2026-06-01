@@ -432,10 +432,20 @@ let lastRunDate = null;
 async function findApprovedForTG() {
   const result = await queryDatabase(POSTS_DB);
   if (!result.results) throw new Error('Posts: ' + JSON.stringify(result).substring(0, 200));
-  return result.results.filter(post => {
+  const all = result.results;
+  const sample = all.slice(0, 3).map(p => {
+    const props = p.properties;
+    return JSON.stringify({
+      dzen: props['Dzen']?.checkbox,
+      tgReady: props['ТГ готов']?.checkbox,
+      hasTgText: !!(props['ТГ-текст']?.rich_text?.length)
+    });
+  });
+  console.log('TG debug sample:', sample.join(', '));
+  return all.filter(post => {
     const tgReady = post.properties['ТГ готов']?.checkbox;
     const dzen = post.properties['Dzen']?.checkbox;
-    const hasText = getProp(post.properties, 'ТГ-текст');
+    const hasText = post.properties['ТГ-текст']?.rich_text?.length > 0;
     return dzen && !tgReady && hasText;
   });
 }
