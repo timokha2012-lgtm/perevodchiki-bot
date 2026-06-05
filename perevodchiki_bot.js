@@ -428,18 +428,8 @@ async function publishVKCycle() {
 // === ПЛАНИРОВЩИК ===
 let lastRunDate = null;
 
-// ── TG ────────────────────────────────────────────────────────────────────
+// -- TG ————————————————————————————————————————————————
 async function findApprovedForTG() {
-  const dzenFilter = { property: 'Dzen', checkbox: { equals: true } };
-  const dzenOnly = await queryDatabase(POSTS_DB, dzenFilter);
-  console.log('Dzen=true total:', dzenOnly.results?.length, 'error:', !dzenOnly.results);
-  if (dzenOnly.results?.length > 0) {
-    const sample = dzenOnly.results[0];
-    console.log('sample props:', JSON.stringify({
-      tgReady: sample.properties['TG готов']?.checkbox,
-      hasTgText: (sample.properties['TG-текст']?.rich_text?.length > 0)
-    }));
-  }
   const filter = {
     and: [
       { property: 'Dzen', checkbox: { equals: true } },
@@ -448,30 +438,33 @@ async function findApprovedForTG() {
   };
   const result = await queryDatabase(POSTS_DB, filter);
   if (!result.results) throw new Error('Posts: ' + JSON.stringify(result).substring(0, 200));
-  console.log('TG approved count:', result.results.length);
+  console.log('TG (Dzen-пакет) кандидатов:', result.results.length);
   return result.results.filter(post => {
-    const hasText = post.properties['TG-текст']?.rich_text?.length > 0;
-    return hasText;
+    const hasDzenText = post.properties['Dzen-текст']?.rich_text?.length > 0;
+    return hasDzenText;
   });
 }
 
-
 async function publishTGCycle() {
-  console.log('\n=== Цикл публикации TG: ' + new Date().toISOString() + ' ===');
+  console.log('\n=== Цикл публикации TG (Дзен-пакет): ' + new Date().toISOString() + ' ===');
   try {
     const approved = await findApprovedForTG();
-    console.log('Утверждено для публикации в TG: ' + approved.length);
+    console.log('Утверждено для TG-доставки:', approved.length);
     for (const post of approved) {
       const title = getProp(post.properties, 'Тема');
       try {
-        const tgText = getProp(post.properties, 'TG-текст');
-        console.log('Публикую в TG: ' + title);
-        await notify(tgText, true);
+        const dzenText = getProp(post.properties, 'Dzen-текст');
+        const imageUrl = getProp(post.properties, 'Картинка') || getProp(post.properties, 'URL');
+        console.log('Отправляю пакет в TG для Дзена:', title);
+        if (imageUrl) {
+          await notifyPhoto(imageUrl, `📚 Пакет для Дзена: ${title}`);
+        }
+        await notify(`📚 Дзен-публикация: ${title}\n\n${dzenText}`, true);
         await updatePage(post.id, { 'TG готов': checkboxProp(true) });
-        console.log('Опубликовано в TG: ' + title);
+        console.log('Пакет для Дзена отправлен в TG:', title);
       } catch (e) {
-        console.error('Ошибка публикации TG: ' + title, e.message);
-        await notify('Ошибка TG: ' + title + ': ' + e.message, false);
+        console.error('Ошибка отправки TG-пакета:', title, e.message);
+        await notify('Ошибка TG-пакета: ' + title + ': ' + e.message, false);
       }
     }
   } catch (e) {
