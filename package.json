@@ -1,8 +1,8 @@
 {
   "name": "perevodchiki-bot",
   "version": "1.0.0",
-  "main": "perevodchiki_bot.js",
+  "main": "runner.js",
   "scripts": {
-    "start": "node perevodchiki_bot.js"
+    "start": "node runner.js"
   }
 }
