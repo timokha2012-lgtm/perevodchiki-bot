@@ -98,3 +98,186 @@ function cleanText(text) {
 }
 
 function parseCarousel(rawText, title) {
+  const text = cleanText(rawText);
+  const lines = text.split('\n').map(line => line.trim()).filter(Boolean);
+  const slides = [];
+  const captionLines = [];
+  let current = null;
+  let inCaption = false;
+
+  for (const line of lines) {
+    if (/подпись|caption/i.test(line) && /карусел/i.test(line)) {
+      inCaption = true;
+      continue;
+    }
+
+    const slideMatch = line.match(/^(?:\*+)?\s*(?:slide|слайд)\s*(\d+)\s*(?:\([^)]*\))?\s*:?\s*(.*)$/i);
+    if (slideMatch && !inCaption) {
+      if (current) slides.push(current);
+      current = { number: Number(slideMatch[1]), text: slideMatch[2].trim() };
+      continue;
+    }
+
+    if (inCaption) {
+      captionLines.push(line);
+    } else if (current) {
+      current.text += (current.text ? '\n' : '') + line;
+    }
+  }
+
+  if (current) slides.push(current);
+
+  let slideTexts = slides
+    .sort((a, b) => a.number - b.number)
+    .map(s => s.text.replace(/\*+/g, '').trim())
+    .filter(Boolean)
+    .slice(0, 10);
+
+  if (slideTexts.length < 2) {
+    slideTexts = chunkText(text.replace(/\*+/g, ''), 230).slice(0, 10);
+  }
+
+  if (slideTexts.length === 1) {
+    slideTexts.push('Записаться на консультацию: @petrov.reab');
+  }
+
+  const caption = (captionLines.join('\n\n') || `${title}\n\nЗаписаться на консультацию: @petrov.reab`).slice(0, 2200);
+  return { slides: slideTexts, caption };
+}
+
+function chunkText(text, maxLength) {
+  const words = text.split(/\s+/).filter(Boolean);
+  const chunks = [];
+  let current = '';
+  for (const word of words) {
+    if ((current + ' ' + word).trim().length > maxLength) {
+      if (current) chunks.push(current);
+      current = word;
+    } else {
+      current = (current + ' ' + word).trim();
+    }
+  }
+  if (current) chunks.push(current);
+  return chunks;
+}
+
+function escapeXml(text) {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+function wrapText(text, maxChars) {
+  const words = text.replace(/\s+/g, ' ').trim().split(' ');
+  const lines = [];
+  let line = '';
+  for (const word of words) {
+    const next = (line + ' ' + word).trim();
+    if (next.length > maxChars && line) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = next;
+    }
+  }
+  if (line) lines.push(line);
+  return lines.slice(0, 9);
+}
+
+function makeSlideSvg(text, index, total, title) {
+  const lines = wrapText(text, 24);
+  const fontSize = lines.length > 6 ? 50 : 60;
+  const lineHeight = Math.round(fontSize * 1.22);
+  const yStart = 540 - ((lines.length - 1) * lineHeight) / 2;
+  const textSpans = lines.map((line, i) =>
+    `<text x="90" y="${yStart + i * lineHeight}" font-size="${fontSize}" font-weight="700" fill="#f7f1e7">${escapeXml(line)}</text>`
+  ).join('');
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1080" viewBox="0 0 1080 1080">
+  <rect width="1080" height="1080" fill="#182028"/>
+  <rect x="44" y="44" width="992" height="992" rx="34" fill="none" stroke="#d7b46a" stroke-width="4"/>
+  <circle cx="920" cy="160" r="86" fill="#2f5d62" opacity="0.7"/>
+  <circle cx="160" cy="900" r="120" fill="#8b3a3a" opacity="0.55"/>
+  <text x="90" y="130" font-size="30" fill="#d7b46a" font-family="Arial, sans-serif">ПЕРЕВОДЧИКИ СЕРДЦА</text>
+  <text x="90" y="188" font-size="26" fill="#9fb1bb" font-family="Arial, sans-serif">${escapeXml(title).slice(0, 58)}</text>
+  <g font-family="Arial, sans-serif">${textSpans}</g>
+  <text x="90" y="980" font-size="28" fill="#d7b46a" font-family="Arial, sans-serif">@petrov.reab</text>
+  <text x="980" y="980" text-anchor="end" font-size="28" fill="#9fb1bb" font-family="Arial, sans-serif">${index + 1}/${total}</text>
+</svg>`;
+}
+
+async function uploadToCloudinary(imageDataUri) {
+  if (!CLOUDINARY_CLOUD_NAME || !CLOUDINARY_API_KEY || !CLOUDINARY_API_SECRET) {
+    throw new Error('Для Instagram-пакета нужны CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY и CLOUDINARY_API_SECRET');
+  }
+  const timestamp = Math.floor(Date.now() / 1000);
+  const stringToSign = `timestamp=${timestamp}${CLOUDINARY_API_SECRET}`;
+  const signature = crypto.createHash('sha1').update(stringToSign).digest('hex');
+  const body = `file=${encodeURIComponent(imageDataUri)}&api_key=${CLOUDINARY_API_KEY}&timestamp=${timestamp}&signature=${signature}`;
+  const result = await apiRequest('api.cloudinary.com', `/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`, 'POST', {}, body, true);
+  if (!result.secure_url) throw new Error('Cloudinary error: ' + JSON.stringify(result).substring(0, 300));
+  return result.secure_url.replace('/upload/', '/upload/f_jpg,w_1080,h_1080,c_fill/');
+}
+
+async function makeCarouselImages(title, carouselText) {
+  const { slides, caption } = parseCarousel(carouselText, title);
+  const imageUrls = [];
+  for (let i = 0; i < slides.length; i += 1) {
+    const svg = makeSlideSvg(slides[i], i, slides.length, title);
+    const dataUri = 'data:image/svg+xml;base64,' + Buffer.from(svg, 'utf8').toString('base64');
+    imageUrls.push(await uploadToCloudinary(dataUri));
+  }
+  return { imageUrls, caption };
+}
+
+async function findInstagramPackagesForTG() {
+  const filter = {
+    and: [
+      { property: 'Instagram', checkbox: { equals: false } },
+      { property: 'Instagram в TG', checkbox: { equals: false } },
+      { property: 'Статус', select: { equals: 'утверждено' } },
+      { property: 'Insta-карусель', rich_text: { is_not_empty: true } }
+    ]
+  };
+  const result = await queryDatabase(POSTS_DB, filter);
+  if (!result.results) throw new Error('Posts: ' + JSON.stringify(result).substring(0, 200));
+  return result.results;
+}
+
+async function sendInstagramPackageCycle() {
+  console.log('\n=== Цикл подготовки Instagram-пакета в TG:', new Date().toISOString(), '===');
+  try {
+    const posts = await findInstagramPackagesForTG();
+    console.log('Готово для Instagram-пакета в TG:', posts.length);
+    for (const post of posts) {
+      const title = getProp(post.properties, 'Тема');
+      try {
+        const carouselText = getProp(post.properties, 'Insta-карусель');
+        console.log('Готовлю Instagram-пакет:', title);
+        const { imageUrls, caption } = await makeCarouselImages(title, carouselText);
+
+        await notify(`📸 Instagram-пакет: *${title}*\n\nСейчас пришлю ${imageUrls.length} слайдов. Потом отдельным сообщением будет подпись.`, true);
+        for (let i = 0; i < imageUrls.length; i += 1) {
+          await notifyPhoto(imageUrls[i], `Слайд ${i + 1}/${imageUrls.length}: ${title}`);
+        }
+        await notify(`Подпись для Instagram:\n\n${caption}`, false);
+
+        await updatePage(post.id, { 'Instagram в TG': checkboxProp(true) });
+        console.log('Instagram-пакет отправлен в TG:', title);
+      } catch (e) {
+        console.error('Ошибка Instagram-пакета:', title, e.message);
+        await notify(`Ошибка Instagram-пакета "${title}": ${e.message}`, false);
+      }
+    }
+  } catch (e) {
+    console.error('Ошибка цикла Instagram-пакетов:', e.message);
+  }
+}
+
+setInterval(sendInstagramPackageCycle, INSTAGRAM_INTERVAL_MINUTES * 60 * 1000);
+sendInstagramPackageCycle();
+
