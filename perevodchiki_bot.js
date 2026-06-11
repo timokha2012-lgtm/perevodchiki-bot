@@ -21,6 +21,10 @@ const IMAGE_STYLE = process.env.IMAGE_STYLE || 'minimalist symbolic illustration
 const VK_TOKEN = process.env.VK_TOKEN;
 const VK_USER_TOKEN = process.env.VK_USER_TOKEN;
 const VK_GROUP_ID = process.env.VK_GROUP_ID;
+const VK_GROUP_IDS = (process.env.VK_GROUP_IDS || VK_GROUP_ID || '')
+  .split(',')
+  .map(id => id.trim().replace(/^-/, ''))
+  .filter(Boolean);
 const VK_ALBUM_ID = process.env.VK_ALBUM_ID;
 const VK_API_VERSION = '5.199';
 
@@ -28,7 +32,8 @@ console.log('=== Переводчики сердца: бот запущен ==='
 console.log('Время старта:', new Date().toISOString());
 console.log('Генерация в', RUN_HOUR_MSK + ':00 МСК');
 console.log('Модель картинок:', OPENAI_IMAGE_MODEL);
-console.log('VK подключён:', !!VK_TOKEN && !!VK_GROUP_ID);
+console.log('VK подключён:', !!VK_TOKEN && VK_GROUP_IDS.length > 0);
+console.log('VK groups:', VK_GROUP_IDS.join(', ') || 'none');
 console.log('VK User Token (для фоток):', !!VK_USER_TOKEN);
 
 // === HTTP-ЗАПРОС ===
@@ -223,8 +228,13 @@ async function vkCall(method, params, useUserToken) {
   return result.response;
 }
 
-async function vkPublish(text, imageUrl) {
-  if (!VK_TOKEN || !VK_GROUP_ID) throw new Error('VK не настроен (нет VK_TOKEN или VK_GROUP_ID)');
+function vkGroupForPost(index) {
+  if (VK_GROUP_IDS.length === 0) return null;
+  return VK_GROUP_IDS[index % VK_GROUP_IDS.length];
+}
+
+async function vkPublish(text, imageUrl, groupId) {
+  if (!VK_TOKEN || !groupId) throw new Error('VK не настроен (нет VK_TOKEN или VK_GROUP_ID/VK_GROUP_IDS)');
 
   let attachment = null;
   let messageText = text || '';
@@ -233,9 +243,9 @@ async function vkPublish(text, imageUrl) {
     if (VK_USER_TOKEN) {
       // Грузим фото на стену сообщества через User Token (правильный путь)
       try {
-        console.log('    VK: получаю wall upload server для группы', VK_GROUP_ID, '...');
+        console.log('    VK: получаю wall upload server для группы', groupId, '...');
         const uploadServer = await vkCall('photos.getWallUploadServer', {
-          group_id: VK_GROUP_ID
+          group_id: groupId
         }, true);
         console.log('    VK: скачиваю картинку с Cloudinary...');
         const imageBuffer = await downloadBuffer(imageUrl);
@@ -244,7 +254,7 @@ async function vkPublish(text, imageUrl) {
         if (uploaded.error) throw new Error('VK upload: ' + JSON.stringify(uploaded));
         console.log('    VK: сохраняю фото на стену...');
         const saved = await vkCall('photos.saveWallPhoto', {
-          group_id: VK_GROUP_ID,
+          group_id: groupId,
           server: uploaded.server,
           photo: uploaded.photo,
           hash: uploaded.hash
@@ -266,14 +276,14 @@ async function vkPublish(text, imageUrl) {
 
   console.log('    VK: публикую пост...');
   const params = {
-    owner_id: '-' + VK_GROUP_ID,
+    owner_id: '-' + groupId,
     from_group: 1,
     message: messageText
   };
   if (attachment) params.attachments = attachment;
   const posted = await vkCall('wall.post', params);
   const postId = posted.post_id;
-  const postUrl = `https://vk.com/wall-${VK_GROUP_ID}_${postId}`;
+  const postUrl = `https://vk.com/wall-${groupId}_${postId}`;
   return postUrl;
 }
 
@@ -400,18 +410,20 @@ async function findApprovedForVK() {
 }
 
 async function publishVKCycle() {
-  if (!VK_TOKEN || !VK_GROUP_ID) return;
+  if (!VK_TOKEN || VK_GROUP_IDS.length === 0) return;
   console.log('\n=== Цикл публикации VK:', new Date().toISOString(), '===');
   try {
     const approved = await findApprovedForVK();
     console.log('Утверждено для публикации в VK:', approved.length);
-    for (const post of approved) {
+    for (let i = 0; i < approved.length; i++) {
+      const post = approved[i];
       const title = getProp(post.properties, 'Тема');
       try {
         const vkText = getProp(post.properties, 'VK-текст');
         const imageUrl = getProp(post.properties, 'Картинка') || getProp(post.properties, 'URL');
-        console.log('Публикую в VK:', title);
-        const vkPostUrl = await vkPublish(vkText, imageUrl);
+        const groupId = vkGroupForPost(i);
+        console.log('Публикую в VK:', title, 'group:', groupId);
+        const vkPostUrl = await vkPublish(vkText, imageUrl, groupId);
         await updatePage(post.id, { 'VK': checkboxProp(true) });
         await notify(`✅ Опубликовано в VK: *${title}*\n\n[Посмотреть пост](${vkPostUrl})`);
         console.log('Опубликовано:', vkPostUrl);
@@ -591,7 +603,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end(`Perevodchiki bot is alive.\nGen at ${RUN_HOUR_MSK}:00 MSK\nImage: ${OPENAI_IMAGE_MODEL}\nVK: ${!!VK_TOKEN && !!VK_GROUP_ID ? 'on' : 'off'}\n`);
+  res.end(`Perevodchiki bot is alive.\nGen at ${RUN_HOUR_MSK}:00 MSK\nImage: ${OPENAI_IMAGE_MODEL}\nVK: ${!!VK_TOKEN && VK_GROUP_IDS.length > 0 ? 'on' : 'off'}\nVK groups: ${VK_GROUP_IDS.join(', ') || 'none'}\n`);
 });
 
 // Защита: если порт занят (двойной запуск модуля), не валим весь процесс
