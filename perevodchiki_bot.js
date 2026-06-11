@@ -12,6 +12,7 @@ const ANTHROPIC_KEY = process.env.ANTHROPIC_KEY;
 const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
 const TG_ADMIN_ID = process.env.TG_ADMIN_ID;
 const RUN_HOUR_MSK = parseInt(process.env.RUN_HOUR_MSK || '9', 10);
+const VK_RUN_HOUR_MSK = parseInt(process.env.VK_RUN_HOUR_MSK || '19', 10);
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_IMAGE_MODEL = process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1';
 const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME;
@@ -31,6 +32,7 @@ const VK_API_VERSION = '5.199';
 console.log('=== Переводчики сердца: бот запущен ===');
 console.log('Время старта:', new Date().toISOString());
 console.log('Генерация в', RUN_HOUR_MSK + ':00 МСК');
+console.log('VK публикация в', VK_RUN_HOUR_MSK + ':00 МСК');
 console.log('Модель картинок:', OPENAI_IMAGE_MODEL);
 console.log('VK подключён:', !!VK_TOKEN && VK_GROUP_IDS.length > 0);
 console.log('VK groups:', VK_GROUP_IDS.join(', ') || 'none');
@@ -415,7 +417,7 @@ async function publishVKCycle() {
   try {
     const approved = await findApprovedForVK();
     console.log('Утверждено для публикации в VK:', approved.length);
-    for (let i = 0; i < approved.length; i++) {
+    for (let i = 0; i < Math.min(approved.length, 1); i++) {
       const post = approved[i];
       const title = getProp(post.properties, 'Тема');
       try {
@@ -439,6 +441,7 @@ async function publishVKCycle() {
 
 // === ПЛАНИРОВЩИК ===
 let lastRunDate = null;
+let lastVKRunDate = null;
 
 // -- TG ————————————————————————————————————————————————
 async function findApprovedForTG() {
@@ -495,12 +498,24 @@ function checkAndRun() {
     runDaily();
   }
 }
+
+function checkAndPublishVK() {
+  const now = new Date();
+  const msk = new Date(now.getTime() + (3 * 60 - now.getTimezoneOffset()) * 60000);
+  const currentHour = msk.getUTCHours();
+  const dateKey = msk.toISOString().substring(0, 10);
+  if (currentHour === VK_RUN_HOUR_MSK && lastVKRunDate !== dateKey) {
+    lastVKRunDate = dateKey;
+    console.log('Запуск ежедневной публикации VK, МСК:', msk.toISOString());
+    publishVKCycle();
+  }
+}
 setInterval(checkAndRun, 5 * 60 * 1000);
-setInterval(publishVKCycle, 60 * 60 * 1000); // публикация раз в час
+setInterval(checkAndPublishVK, 5 * 60 * 1000);
 setInterval(publishTGCycle, 60 * 60 * 1000);
 publishTGCycle();
 checkAndRun();
-publishVKCycle(); // и сразу при старте
+checkAndPublishVK();
 
 // === SEED ENDPOINT (одноразовое создание тем в Notion) ===
 const SEED_KEY = process.env.SEED_KEY;
@@ -603,7 +618,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end(`Perevodchiki bot is alive.\nGen at ${RUN_HOUR_MSK}:00 MSK\nImage: ${OPENAI_IMAGE_MODEL}\nVK: ${!!VK_TOKEN && VK_GROUP_IDS.length > 0 ? 'on' : 'off'}\nVK groups: ${VK_GROUP_IDS.join(', ') || 'none'}\n`);
+  res.end(`Perevodchiki bot is alive.\nGen at ${RUN_HOUR_MSK}:00 MSK\nVK publish at ${VK_RUN_HOUR_MSK}:00 MSK\nImage: ${OPENAI_IMAGE_MODEL}\nVK: ${!!VK_TOKEN && VK_GROUP_IDS.length > 0 ? 'on' : 'off'}\nVK groups: ${VK_GROUP_IDS.join(', ') || 'none'}\n`);
 });
 
 // Защита: если порт занят (двойной запуск модуля), не валим весь процесс
