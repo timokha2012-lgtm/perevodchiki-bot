@@ -235,13 +235,38 @@ function vkGroupForPost(index) {
   return VK_GROUP_IDS[index % VK_GROUP_IDS.length];
 }
 
-async function vkPublish(text, imageUrl, groupId) {
+async function vkUploadVideo(videoUrl, title, description, groupId) {
+  console.log('    VK: получаю video upload server для группы', groupId, '...');
+  const saved = await vkCall('video.save', {
+    group_id: groupId,
+    name: title || 'Видео',
+    description: description || '',
+    wallpost: 0
+  });
+  if (!saved || !saved.upload_url) throw new Error('VK video.save: нет upload_url');
+
+  console.log('    VK: скачиваю видео...');
+  const videoBuffer = await downloadBuffer(videoUrl);
+  console.log('    VK: загружаю видео (' + videoBuffer.length + ' байт)...');
+  const uploaded = await uploadMultipart(saved.upload_url, 'video_file', 'video.mp4', videoBuffer, 'video/mp4');
+  if (uploaded.error) throw new Error('VK video upload: ' + JSON.stringify(uploaded));
+
+  const ownerId = uploaded.owner_id || saved.owner_id;
+  const videoId = uploaded.video_id || saved.video_id;
+  if (!ownerId || !videoId) throw new Error('VK video upload: нет owner_id/video_id в ответе');
+  return `video${ownerId}_${videoId}`;
+}
+
+async function vkPublish(text, imageUrl, groupId, videoUrl, title) {
   if (!VK_TOKEN || !groupId) throw new Error('VK не настроен (нет VK_TOKEN или VK_GROUP_ID/VK_GROUP_IDS)');
 
   let attachment = null;
   let messageText = text || '';
 
-  if (imageUrl) {
+  if (videoUrl) {
+    attachment = await vkUploadVideo(videoUrl, title, messageText, groupId);
+    console.log('    VK: video attachment =', attachment);
+  } else if (imageUrl) {
     if (VK_USER_TOKEN) {
       // Грузим фото на стену сообщества через User Token (правильный путь)
       try {
@@ -423,9 +448,10 @@ async function publishVKCycle() {
       try {
         const vkText = getProp(post.properties, 'VK-текст');
         const imageUrl = getProp(post.properties, 'Картинка') || getProp(post.properties, 'URL');
+        const videoUrl = getProp(post.properties, 'Видео');
         const groupId = vkGroupForPost(i);
         console.log('Публикую в VK:', title, 'group:', groupId);
-        const vkPostUrl = await vkPublish(vkText, imageUrl, groupId);
+        const vkPostUrl = await vkPublish(vkText, imageUrl, groupId, videoUrl, title);
         await updatePage(post.id, { 'VK': checkboxProp(true) });
         await notify(`✅ Опубликовано в VK: *${title}*\n\n[Посмотреть пост](${vkPostUrl})`);
         console.log('Опубликовано:', vkPostUrl);
