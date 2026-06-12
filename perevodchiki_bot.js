@@ -218,6 +218,87 @@ function uploadMultipart(uploadUrlString, fieldName, filename, buffer, mimeType)
   });
 }
 
+function uploadMultipartFields(uploadUrlString, fields, fileFieldName, filename, buffer, mimeType) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(uploadUrlString);
+    const boundary = '----PerevodchikiFormBoundary' + Date.now();
+    const chunks = [];
+    for (const [name, value] of Object.entries(fields || {})) {
+      chunks.push(Buffer.from(
+        `--${boundary}\r\n` +
+        `Content-Disposition: form-data; name="${name}"\r\n\r\n` +
+        `${value}\r\n`
+      ));
+    }
+    chunks.push(Buffer.from(
+      `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="${fileFieldName}"; filename="${filename}"\r\n` +
+      `Content-Type: ${mimeType}\r\n\r\n`
+    ));
+    chunks.push(buffer);
+    chunks.push(Buffer.from(`\r\n--${boundary}--\r\n`));
+    const body = Buffer.concat(chunks);
+    const req = https.request({
+      hostname: u.hostname,
+      path: u.pathname + u.search,
+      method: 'POST',
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': body.length
+      }
+    }, res => {
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => {
+        try { resolve(JSON.parse(data)); }
+        catch (e) { resolve({ error: 'parse', raw: data, status: res.statusCode }); }
+      });
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+async function uploadVideoToCloudinary(buffer, filename) {
+  if (!CLOUDINARY_CLOUD_NAME || !CLOUDINARY_API_KEY || !CLOUDINARY_API_SECRET) {
+    throw new Error('Cloudinary video upload is not configured');
+  }
+  const timestamp = Math.floor(Date.now() / 1000);
+  const signature = crypto
+    .createHash('sha1')
+    .update(`timestamp=${timestamp}${CLOUDINARY_API_SECRET}`)
+    .digest('hex');
+  const result = await uploadMultipartFields(
+    `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/video/upload`,
+    { api_key: CLOUDINARY_API_KEY, timestamp, signature },
+    'file',
+    filename || 'video.mp4',
+    buffer,
+    'video/mp4'
+  );
+  if (!result.secure_url) throw new Error('Cloudinary video error: ' + JSON.stringify(result).substring(0, 500));
+  return result.secure_url;
+}
+
+function readRequestBuffer(req, limitBytes) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let total = 0;
+    req.on('data', chunk => {
+      total += chunk.length;
+      if (total > limitBytes) {
+        reject(new Error('File is too large'));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
 async function vkCall(method, params, useUserToken) {
   const token = useUserToken && VK_USER_TOKEN ? VK_USER_TOKEN : VK_TOKEN;
   const allParams = Object.assign({}, params, {
@@ -624,7 +705,45 @@ if (process.env.SEED_NOW === 'true') {
 }
 
 // === HEALTHCHECK + SEED ENDPOINT ===
+const VIDEO_UPLOAD_KEY = process.env.VIDEO_UPLOAD_KEY || SEED_KEY;
+
 const server = http.createServer(async (req, res) => {
+  if (req.url && req.url.startsWith('/upload-video')) {
+    const url = new URL(req.url, 'http://localhost');
+    const key = url.searchParams.get('key');
+    const pageId = url.searchParams.get('page');
+    if (!VIDEO_UPLOAD_KEY || key !== VIDEO_UPLOAD_KEY) {
+      res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, error: 'Forbidden. Need correct ?key=...' }));
+      return;
+    }
+    if (req.method !== 'POST') {
+      res.writeHead(405, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, error: 'Use POST with raw mp4 body' }));
+      return;
+    }
+    try {
+      const filename = decodeURIComponent(req.headers['x-filename'] || 'video.mp4');
+      const buffer = await readRequestBuffer(req, 250 * 1024 * 1024);
+      console.log('Video upload endpoint: received', filename, buffer.length, 'bytes');
+      const videoUrl = await uploadVideoToCloudinary(buffer, filename);
+      if (pageId) {
+        await updatePage(pageId, {
+          'Видео': urlProp(videoUrl),
+          'VK': checkboxProp(false),
+          'Статус': { select: { name: 'утверждено' } }
+        });
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: true, videoUrl, pageId: pageId || null }));
+    } catch (e) {
+      console.error('Video upload endpoint error:', e.message);
+      res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: false, error: e.message }));
+    }
+    return;
+  }
+
   if (req.url && req.url.startsWith('/seed')) {
     const url = new URL(req.url, 'http://localhost');
     const key = url.searchParams.get('key');
