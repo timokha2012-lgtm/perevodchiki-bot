@@ -1,96 +1,79 @@
 'use strict';
-const fs = require('fs');
+const fs   = require('fs');
 const path = require('path');
-const Module = require('module');
+const Mod  = require('module');
 
-// ─── VK GROUP COUNTER (persists via file across restarts/ticks) ──────────────
-const COUNTER_FILE = path.join(__dirname, '.vk_post_counter');
-
-function readVKCounter() {
-  try { return parseInt(fs.readFileSync(COUNTER_FILE, 'utf8').trim(), 10) || 0; }
+// Persistent VK group counter
+const CFILE = path.join(__dirname, '.vk_post_counter');
+function rdCtr() {
+  try { return parseInt(fs.readFileSync(CFILE, 'utf8').trim(), 10) || 0; }
   catch (_) { return 0; }
 }
-
-function writeVKCounter(n) {
-  try { fs.writeFileSync(COUNTER_FILE, String(n), 'utf8'); } catch (_) {}
+function wrCtr(n) {
+  try { fs.writeFileSync(CFILE, String(n), 'utf8'); } catch (_) {}
 }
 
-// ─── PATCH + COMPILE perevodchiki_bot.js ─────────────────────────────────────
 function requirePatchedBot(file) {
-  const filename = path.join(__dirname, file);
-  let code = fs.readFileSync(filename, 'utf8');
-  const patches = [];
+  const fname = path.join(__dirname, file);
+  let code = fs.readFileSync(fname, 'utf8');
+  const log = [];
 
-  // PATCH 1: video.save -> use VK_USER_TOKEN (add ", true" as 2nd arg to vkCall)
-  // Matches: vkCall('video.save', { ... wallpost: 0 });
-  // /s flag makes . match newlines
-  const p1Already = /vkCall('video.save',s*{[sS]*?wallpost:s*0s*},s*trues*)/.test(code);
-  if (!p1Already) {
-    const p1re = /(vkCall('video.save',s*{[sS]*?wallpost:s*0s*})s*)/;
-    if (!p1re.test(code)) {
-      throw new Error('[runner] PATCH1 target not found: vkCall video.save');
-    }
-    code = code.replace(p1re, '$1, true)');
-    patches.push('video.save->userToken');
-  } else {
-    patches.push('video.save->userToken(already)');
-  }
-
-  // PATCH 2: Dzen flag - when dzenMatch fires, also set checkbox Dzen=true
-  const DZEN_TEXT_PROP = 'Dzen-\u0442\u0435\u043a\u0441\u0442';
-  const p2Already = /ifs*(dzenMatch)s*{[sS]*?updates['Dzen']/.test(code);
-  if (!p2Already) {
-    // Match: <indent>if (dzenMatch) updates['Dzen-текст'] = richText(dzenMatch[1].trim());
-    const p2re = new RegExp(
-      '([ \t]*)if\s*\(dzenMatch\)\s+' +
-      "updates\['Dzen-\u0442\u0435\u043a\u0441\u0442'\]" +
-      '\s*=\s*richText\(dzenMatch\[1\]\.trim\(\)\);'
-    );
-    if (!p2re.test(code)) {
-      throw new Error('[runner] PATCH2 target not found: Dzen checkbox line');
-    }
-    code = code.replace(p2re, function(_, indent) {
-      return indent + "if (dzenMatch) {\n" +
-        indent + "  updates['" + DZEN_TEXT_PROP + "'] = richText(dzenMatch[1].trim());\n" +
-        indent + "  updates['Dzen'] = checkboxProp(true);\n" +
-        indent + "}";
-    });
-    patches.push('Dzen->checkbox');
-  } else {
-    patches.push('Dzen->checkbox(already)');
-  }
-
-  // PATCH 3: VK group rotation via persistent counter
-  // Target: const groupId = vkGroupForPost(i);
-  // Inject counter read/write inline (using require so it's in scope)
-  const p3Already = code.includes('__vkIdx = readVKCounter');
-  if (!p3Already) {
-    const p3re = /const groupId = vkGroupForPost(i);/;
-    if (p3re.test(code)) {
-      // Inject counter helpers at top of file (after first require line)
-      const helperCode =
-        "\nconst __ctrFs = require('fs'), __ctrPath = require('path').join(__dirname, '.vk_post_counter');\n" +
-        "function __readVKIdx(){try{return parseInt(__ctrFs.readFileSync(__ctrPath,'utf8').trim(),10)||0;}catch(_){return 0;}}\n" +
-        "function __writeVKIdx(n){try{__ctrFs.writeFileSync(__ctrPath,String(n),'utf8');}catch(_){}}\n";
-      code = code.replace(/^('use strict';\n)?/, '$1' + helperCode);
-
-      code = code.replace(p3re,
-        'const __vkIdx = __readVKIdx(); __writeVKIdx(__vkIdx + 1);\n      const groupId = vkGroupForPost(__vkIdx);'
-      );
-      patches.push('VK-rotation->counter');
+  // P1: video.save -> use VK_USER_TOKEN (add ", true" second arg to vkCall)
+  // Exact target string from perevodchiki_bot.js (4-space indent inside object):
+  const P1_OLD = "    wallpost: 0\n  });\n  if (!saved || !saved.upload_url)";
+  const P1_NEW = "    wallpost: 0\n  }, true);\n  if (!saved || !saved.upload_url)";
+  if (!code.includes(P1_NEW)) {
+    if (code.includes(P1_OLD)) {
+      code = code.replace(P1_OLD, P1_NEW);
+      log.push('P1:video.save->userToken');
     } else {
-      patches.push('VK-rotation(not found, skip)');
+      console.warn('[runner] P1: target not found, video.save may use group token');
+      log.push('P1:skip');
     }
-  } else {
-    patches.push('VK-rotation(already)');
-  }
+  } else { log.push('P1:already'); }
 
-  console.log('[runner] Patches applied:', patches.join(', '));
+  // P2: Dzen checkbox – when dzenMatch set also Dzen=true
+  const DPROP = 'Dzen-\u0442\u0435\u043a\u0441\u0442';
+  const P2_OLD = "    if (dzenMatch) updates['" + DPROP + "'] = richText(dzenMatch[1].trim());";
+  const P2_NEW = "    if (dzenMatch) {\n" +
+                 "      updates['" + DPROP + "'] = richText(dzenMatch[1].trim());\n" +
+                 "      updates['Dzen'] = checkboxProp(true);\n" +
+                 "    }";
+  if (!code.includes(P2_NEW)) {
+    if (code.includes(P2_OLD)) {
+      code = code.replace(P2_OLD, P2_NEW);
+      log.push('P2:Dzen->checkbox');
+    } else {
+      console.warn('[runner] P2: Dzen target not found');
+      log.push('P2:skip');
+    }
+  } else { log.push('P2:already'); }
 
-  const m = new Module(filename, module);
-  m.filename = filename;
-  m.paths = Module._nodeModulePaths(__dirname);
-  m._compile(code, filename);
+  // P3: VK group rotation via persistent counter
+  // vkGroupForPost(i) -> vkGroupForPost(counter)
+  const P3_OLD = 'const groupId = vkGroupForPost(i);';
+  if (!code.includes('/*vk-rotation-patched*/')) {
+    if (code.includes(P3_OLD)) {
+      const p3replacement =
+        '/*vk-rotation-patched*/' +
+        'const __idx=rdCtr();wrCtr(__idx+1);\n' +
+        '      const groupId = vkGroupForPost(__idx);';
+      code = code.replace(P3_OLD, p3replacement);
+      // expose rdCtr/wrCtr globally so compiled code can call them
+      global.rdCtr = rdCtr;
+      global.wrCtr = wrCtr;
+      log.push('P3:VK-rotation');
+    } else {
+      log.push('P3:skip');
+    }
+  } else { log.push('P3:already'); }
+
+  console.log('[runner] patches:', log.join(', '));
+
+  const m = new Mod(fname, module);
+  m.filename = fname;
+  m.paths = Mod._nodeModulePaths(__dirname);
+  m._compile(code, fname);
   return m.exports;
 }
 
