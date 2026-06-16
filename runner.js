@@ -5,6 +5,8 @@ const Mod = require('module');
 
 // Force VK publishing to morning. Railway can override with VK_MORNING_HOUR_MSK.
 process.env.VK_RUN_HOUR_MSK = process.env.VK_MORNING_HOUR_MSK || '10';
+process.env.ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || 'claude-3-5-sonnet-20241022';
+process.env.ANTHROPIC_FAST_MODEL = process.env.ANTHROPIC_FAST_MODEL || 'claude-3-5-haiku-20241022';
 
 const CFILE = path.join(__dirname, '.vk_post_counter');
 function rdCtr() {
@@ -132,6 +134,51 @@ function requirePatchedBot(file) {
     }
   } else {
     log.push('P7:already');
+  }
+
+  const P8_OLD = "{ model: model || 'claude-sonnet-4-20250514', max_tokens: maxTokens || 2000, messages: [{ role: 'user', content: prompt }] }";
+  const P8_NEW = "{ model: model || process.env.ANTHROPIC_MODEL || 'claude-3-5-sonnet-20241022', max_tokens: maxTokens || 2000, messages: [{ role: 'user', content: prompt }] }";
+  if (code.includes(P8_OLD)) {
+    code = code.replace(P8_OLD, P8_NEW);
+    log.push('P8:sonnet-model-fallback');
+  } else {
+    log.push('P8:skip');
+  }
+
+  const P9_OLD = "300, 'claude-haiku-4-5-20251001'";
+  const P9_NEW = "300, process.env.ANTHROPIC_FAST_MODEL || 'claude-3-5-haiku-20241022'";
+  if (code.includes(P9_OLD)) {
+    code = code.replace(P9_OLD, P9_NEW);
+    log.push('P9:haiku-model-fallback');
+  } else {
+    log.push('P9:skip');
+  }
+
+  if (!code.includes("reqUrl.pathname === '/run-now'")) {
+    const P10_OLD = "const server = http.createServer(async (req, res) => {\n";
+    const P10_NEW = "const server = http.createServer(async (req, res) => {\n" +
+      "  const reqUrl = new URL(req.url || '/', 'http://localhost');\n" +
+      "  if (reqUrl.pathname === '/run-now') {\n" +
+      "    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });\n" +
+      "    runDaily();\n" +
+      "    publishVKCycle();\n" +
+      "    res.end('Started: generation + VK publish\\n');\n" +
+      "    return;\n" +
+      "  }\n" +
+      "  if (reqUrl.pathname === '/vk-now') {\n" +
+      "    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });\n" +
+      "    publishVKCycle();\n" +
+      "    res.end('Started: VK publish\\n');\n" +
+      "    return;\n" +
+      "  }\n";
+    if (code.includes(P10_OLD)) {
+      code = code.replace(P10_OLD, P10_NEW);
+      log.push('P10:run-now-endpoint');
+    } else {
+      log.push('P10:skip');
+    }
+  } else {
+    log.push('P10:already');
   }
 
   console.log('[runner] forced VK_RUN_HOUR_MSK =', process.env.VK_RUN_HOUR_MSK);
