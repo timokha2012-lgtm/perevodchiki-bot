@@ -11,6 +11,9 @@ const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_IMAGE_MODEL = process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1';
 const OPENAI_IMAGE_SIZE = process.env.OPENAI_IMAGE_SIZE || '1024x1024';
+const IG_USER_ID = process.env.IG_USER_ID || process.env.INSTAGRAM_USER_ID;
+const IG_ACCESS_TOKEN = process.env.IG_ACCESS_TOKEN || process.env.INSTAGRAM_ACCESS_TOKEN || process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
+const INSTAGRAM_DIRECT_PUBLISH = String(process.env.INSTAGRAM_DIRECT_PUBLISH || 'true').toLowerCase() !== 'false';
 const INSTAGRAM_INTERVAL_MINUTES = parseInt(process.env.INSTAGRAM_INTERVAL_MINUTES || '60', 10);
 const INSTAGRAM_AI_BACKGROUNDS = String(process.env.INSTAGRAM_AI_BACKGROUNDS || 'true').toLowerCase() !== 'false';
 
@@ -95,6 +98,10 @@ function getProp(props, name) {
 }
 
 function checkboxProp(value) { return { checkbox: !!value }; }
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 function cleanText(text) {
   return (text || '')
@@ -361,6 +368,45 @@ async function uploadToCloudinary(imageDataUri, width, height) {
   return result.secure_url.replace('/upload/', `/upload/f_jpg,w_${width},h_${height},c_fill,q_auto:good/`);
 }
 
+async function graphPost(path, params) {
+  if (!IG_ACCESS_TOKEN) throw new Error('Нет IG_ACCESS_TOKEN / INSTAGRAM_ACCESS_TOKEN / FACEBOOK_PAGE_ACCESS_TOKEN');
+  const body = new URLSearchParams(Object.assign({}, params, { access_token: IG_ACCESS_TOKEN })).toString();
+  const result = await apiRequest('graph.facebook.com', path, 'POST', {}, body, true);
+  if (result.error) throw new Error('Instagram Graph error: ' + JSON.stringify(result.error).substring(0, 300));
+  return result;
+}
+
+async function publishInstagramCarousel(imageUrls, caption) {
+  if (!INSTAGRAM_DIRECT_PUBLISH) return null;
+  if (!IG_USER_ID || !IG_ACCESS_TOKEN) return null;
+  if (!imageUrls || imageUrls.length === 0) throw new Error('Instagram: нет слайдов для публикации');
+
+  const children = [];
+  for (const imageUrl of imageUrls.slice(0, 10)) {
+    const created = await graphPost(`/${IG_USER_ID}/media`, {
+      image_url: imageUrl,
+      is_carousel_item: 'true'
+    });
+    if (!created.id) throw new Error('Instagram media container without id: ' + JSON.stringify(created).substring(0, 200));
+    children.push(created.id);
+    await sleep(1200);
+  }
+
+  const carousel = await graphPost(`/${IG_USER_ID}/media`, {
+    media_type: 'CAROUSEL',
+    children: children.join(','),
+    caption: caption || ''
+  });
+  if (!carousel.id) throw new Error('Instagram carousel container without id: ' + JSON.stringify(carousel).substring(0, 200));
+
+  await sleep(5000);
+  const published = await graphPost(`/${IG_USER_ID}/media_publish`, {
+    creation_id: carousel.id
+  });
+  if (!published.id) throw new Error('Instagram publish without id: ' + JSON.stringify(published).substring(0, 200));
+  return published.id;
+}
+
 async function makeCarouselImages(title, carouselText) {
   const { slides, caption } = parseCarousel(carouselText, title);
   const imageUrls = [];
@@ -411,8 +457,19 @@ async function sendInstagramPackageCycle() {
         }
         await notify(`Подпись для Instagram:\n\n${caption}`, false);
 
-        await updatePage(post.id, { 'Instagram в TG': checkboxProp(true) });
-        console.log('Instagram-пакет отправлен в TG:', title);
+        const pageUpdate = { 'Instagram в TG': checkboxProp(true) };
+        const publishedId = await publishInstagramCarousel(imageUrls, caption);
+        if (publishedId) {
+          pageUpdate['Instagram'] = checkboxProp(true);
+          await notify(`✅ Опубликовано в Instagram: ${title}\nID: ${publishedId}`, false);
+          console.log('Instagram-карусель опубликована:', title, publishedId);
+        } else {
+          await notify('Instagram прямая публикация не настроена: нужны IG_USER_ID и IG_ACCESS_TOKEN в Railway. Пакет отправлен в Telegram.', false);
+          console.log('Instagram direct publish skipped: no IG_USER_ID/IG_ACCESS_TOKEN');
+        }
+
+        await updatePage(post.id, pageUpdate);
+        console.log('Instagram-пакет обработан:', title);
       } catch (e) {
         console.error('Ошибка Instagram-пакета:', title, e.message);
         await notify(`Ошибка Instagram-пакета "${title}": ${e.message}`, false);
