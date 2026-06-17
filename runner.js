@@ -5,8 +5,8 @@ const Mod = require('module');
 
 // Force VK publishing to morning. Railway can override with VK_MORNING_HOUR_MSK.
 process.env.VK_RUN_HOUR_MSK = process.env.VK_MORNING_HOUR_MSK || '10';
-process.env.ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || 'claude-3-5-sonnet-20241022';
-process.env.ANTHROPIC_FAST_MODEL = process.env.ANTHROPIC_FAST_MODEL || 'claude-3-5-haiku-20241022';
+process.env.ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6';
+process.env.ANTHROPIC_FAST_MODEL = process.env.ANTHROPIC_FAST_MODEL || 'claude-haiku-4-5-20251001';
 
 const CFILE = path.join(__dirname, '.vk_post_counter');
 function rdCtr() {
@@ -137,7 +137,7 @@ function requirePatchedBot(file) {
   }
 
   const P8_OLD = "{ model: model || 'claude-sonnet-4-20250514', max_tokens: maxTokens || 2000, messages: [{ role: 'user', content: prompt }] }";
-  const P8_NEW = "{ model: model || process.env.ANTHROPIC_MODEL || 'claude-3-5-sonnet-20241022', max_tokens: maxTokens || 2000, messages: [{ role: 'user', content: prompt }] }";
+  const P8_NEW = "{ model: model || process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6', max_tokens: maxTokens || 2000, messages: [{ role: 'user', content: prompt }] }";
   if (code.includes(P8_OLD)) {
     code = code.replace(P8_OLD, P8_NEW);
     log.push('P8:sonnet-model-fallback');
@@ -146,7 +146,7 @@ function requirePatchedBot(file) {
   }
 
   const P9_OLD = "300, 'claude-haiku-4-5-20251001'";
-  const P9_NEW = "300, process.env.ANTHROPIC_FAST_MODEL || 'claude-3-5-haiku-20241022'";
+  const P9_NEW = "300, process.env.ANTHROPIC_FAST_MODEL || 'claude-haiku-4-5-20251001'";
   if (code.includes(P9_OLD)) {
     code = code.replace(P9_OLD, P9_NEW);
     log.push('P9:haiku-model-fallback');
