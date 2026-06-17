@@ -10,7 +10,7 @@ const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY;
 const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_IMAGE_MODEL = process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1';
-const OPENAI_IMAGE_SIZE = process.env.OPENAI_IMAGE_SIZE || '1024x1024';
+const OPENAI_IMAGE_SIZE = process.env.OPENAI_IMAGE_SIZE || '1024x1536';
 const IG_USER_ID = process.env.IG_USER_ID || process.env.INSTAGRAM_USER_ID;
 const IG_ACCESS_TOKEN = process.env.IG_ACCESS_TOKEN || process.env.INSTAGRAM_ACCESS_TOKEN || process.env.FACEBOOK_PAGE_ACCESS_TOKEN;
 const INSTAGRAM_DIRECT_PUBLISH = String(process.env.INSTAGRAM_DIRECT_PUBLISH || 'true').toLowerCase() !== 'false';
@@ -108,8 +108,45 @@ function cleanText(text) {
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/\\\\\|/g, '|')
     .replace(/\\\*/g, '*')
+    .replace(/\uFFFD/g, '')
     .replace(/\r/g, '')
     .trim();
+}
+
+function splitCaptionMarker(text) {
+  const marker = text.search(/(?:подпись\s+для\s+instagram|подпись|caption)\s*:/i);
+  if (marker < 0) return { before: text, after: '' };
+  const before = text.slice(0, marker).trim();
+  const after = text.slice(marker).replace(/^(?:подпись\s+для\s+instagram|подпись|caption)\s*:\s*/i, '').trim();
+  return { before, after };
+}
+
+function sanitizeSlideText(text, index, total, title) {
+  let value = splitCaptionMarker(text).before;
+  value = value
+    .replace(/\uFFFD/g, '')
+    .replace(/[-–—]{2,}.*$/g, '')
+    .replace(/\b(?:подпись|caption)\b[\s\S]*$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (index === total - 1) {
+    return `Сохрани эту карусель. Записаться: ${HANDLE}`;
+  }
+
+  if (!value) {
+    const fallback = [
+      title || 'Путь начинается с честности.',
+      'Назови то, что происходит внутри. Без приговора себе.',
+      'Стыд закрывает. Совесть показывает направление.',
+      'Один честный шаг сильнее бесконечных обещаний.',
+      'Не оставайся с этим один.',
+      'Выход начинается с разговора.'
+    ];
+    value = fallback[index] || title || 'Путь начинается с честности.';
+  }
+
+  return value.split(/\s+/).slice(0, 24).join(' ');
 }
 
 function parseCarousel(rawText, title) {
@@ -121,10 +158,17 @@ function parseCarousel(rawText, title) {
   let inCaption = false;
 
   for (const line of lines) {
-    if (/^(?:\*+)?\s*(?:подпись|caption)\b/i.test(line)) {
+    const splitLine = splitCaptionMarker(line);
+    if (splitLine.after || /^(?:\*+)?\s*(?:подпись|caption)\b/i.test(line)) {
+      if (current && splitLine.before) {
+        current.text += (current.text ? '\n' : '') + splitLine.before;
+      }
+      if (current) {
+        slides.push(current);
+        current = null;
+      }
       inCaption = true;
-      const afterColon = line.split(':').slice(1).join(':').trim();
-      if (afterColon) captionLines.push(afterColon);
+      if (splitLine.after) captionLines.push(splitLine.after);
       continue;
     }
 
@@ -166,6 +210,7 @@ function parseCarousel(rawText, title) {
     ];
     slideTexts.push(fallback[slideTexts.length]);
   }
+  slideTexts = slideTexts.map((slide, index) => sanitizeSlideText(slide, index, 7, title));
 
   const caption = (captionLines.join('\n\n') || `${title}\n\nЕсли откликается, напиши в директ: ${HANDLE}`).slice(0, 2200);
   return { slides: slideTexts, caption };
@@ -209,6 +254,9 @@ function normalizeSlideText(text) {
 
 function splitHeadlineBody(text) {
   const cleaned = normalizeSlideText(text);
+  if (/^сохрани\s+эту\s+карусель/i.test(cleaned)) {
+    return { headline: 'Сохрани эту карусель.', body: `Записаться: ${HANDLE}` };
+  }
   const sentences = cleaned.split(/(?<=[.!?])\s+/).filter(Boolean);
   if (sentences.length > 1 && sentences[0].length <= 72) {
     return { headline: sentences[0], body: sentences.slice(1).join(' ') };
@@ -316,6 +364,18 @@ function makeSlideSvg(text, index, total, title, backgroundUrl) {
 }
 
 function buildBackgroundPrompt(slideText, index, title) {
+  const text = normalizeSlideText(slideText).toLowerCase();
+  const topic = normalizeSlideText(title || 'inner recovery');
+  const metaphorRules = [
+    [/бессмысл|смысл|пустот/, 'a person sitting at a simple table with an open notebook, one warm lamp, a quiet search for meaning'],
+    [/страх|страшно|тревог/, 'a half-open wooden door with warm light behind it, a person hesitating in shadow'],
+    [/стыд|вина|плох/, 'a blurred reflection in an old mirror, soft light revealing a face without showing identity'],
+    [/зависим|срыв|употреб/, 'a broken chain on a dark wooden floor beside a small beam of daylight'],
+    [/прощ|милост|оправдан/, 'a narrow road in morning fog with gentle sunlight breaking through'],
+    [/одиноч|общени|нужен/, 'two empty chairs near a window with soft morning light, intimate and human'],
+    [/надеж|выход|шаг/, 'a staircase or path leading toward a quiet warm light, realistic and hopeful']
+  ];
+  const matched = metaphorRules.find(([rx]) => rx.test(text) || rx.test(topic));
   const metaphors = [
     'a dim mirror with a blurred human silhouette',
     'a person sitting alone in a dark room near a wall',
@@ -325,12 +385,15 @@ function buildBackgroundPrompt(slideText, index, title) {
     'an old door slightly open with warm light through the gap',
     'an open notebook on a wooden table under a single soft lamp'
   ];
+  const metaphor = matched ? matched[1] : metaphors[index % metaphors.length];
   return [
-    'Cinematic vertical editorial photograph for a psychology and faith Instagram carousel.',
-    `Topic: ${title || 'inner recovery'}. Slide idea: ${slideText}.`,
-    `Visual metaphor: ${metaphors[index % metaphors.length]}.`,
-    'Dark moody atmosphere, realistic photo, soft directional light, shallow depth of field, premium magazine style.',
-    'Leave large empty dark space on the left/top for Russian text overlay. No letters, no words, no logos, no watermark, no hands with readable tattoos.'
+    'Create a premium realistic vertical editorial photo for a psychology and Christian counseling Instagram carousel.',
+    `Theme: ${topic}. Slide meaning: ${normalizeSlideText(slideText)}.`,
+    `Main visual metaphor: ${metaphor}.`,
+    'Photorealistic, cinematic but warm, tasteful, emotionally precise, premium magazine cover quality, natural objects, no surreal distortions.',
+    'Composition: subject on the lower right or far right, large clean dark negative space on the upper left for white Russian text overlay.',
+    'Lighting: soft directional light, deep shadows with visible detail, warm highlights, shallow depth of field, 50mm lens look.',
+    'Absolutely no text, no letters, no numbers, no logos, no watermark, no UI, no extra fingers, no deformed faces.'
   ].join(' ');
 }
 
