@@ -181,6 +181,42 @@ function requirePatchedBot(file) {
     log.push('P10:already');
   }
 
+  const P11_OLD = "    publishVKCycle();\n    res.end('Started: generation + VK publish\\n');";
+  const P11_NEW = "    publishVKCycle();\n    if (global.sendInstagramPackageCycle) global.sendInstagramPackageCycle();\n    res.end('Started: generation + VK + Instagram package\\n');";
+  if (!code.includes('Started: generation + VK + Instagram package')) {
+    if (code.includes(P11_OLD)) {
+      code = code.replace(P11_OLD, P11_NEW);
+      log.push('P11:run-now-instagram');
+    } else {
+      log.push('P11:skip');
+    }
+  } else {
+    log.push('P11:already');
+  }
+
+  if (!code.includes("reqUrl.pathname === '/insta-now'")) {
+    const P12_OLD = "  if (reqUrl.pathname === '/vk-now') {\n";
+    const P12_NEW = "  if (reqUrl.pathname === '/insta-now') {\n" +
+      "    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });\n" +
+      "    if (global.sendInstagramPackageCycle) {\n" +
+      "      global.sendInstagramPackageCycle();\n" +
+      "      res.end('Started: Instagram package\\n');\n" +
+      "    } else {\n" +
+      "      res.end('Instagram package runner is not ready yet\\n');\n" +
+      "    }\n" +
+      "    return;\n" +
+      "  }\n" +
+      "  if (reqUrl.pathname === '/vk-now') {\n";
+    if (code.includes(P12_OLD)) {
+      code = code.replace(P12_OLD, P12_NEW);
+      log.push('P12:insta-now-endpoint');
+    } else {
+      log.push('P12:skip');
+    }
+  } else {
+    log.push('P12:already');
+  }
+
   console.log('[runner] forced VK_RUN_HOUR_MSK =', process.env.VK_RUN_HOUR_MSK);
   console.log('[runner] patches:', log.join(', '));
 
