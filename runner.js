@@ -7,6 +7,11 @@ const Mod = require('module');
 process.env.VK_RUN_HOUR_MSK = process.env.VK_MORNING_HOUR_MSK || '10';
 process.env.ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6';
 process.env.ANTHROPIC_FAST_MODEL = process.env.ANTHROPIC_FAST_MODEL || 'claude-haiku-4-5-20251001';
+process.env.OPENAI_IMAGES_ENABLED = process.env.OPENAI_IMAGES_ENABLED || 'false';
+process.env.OPENAI_MAX_IMAGES_PER_RUN = process.env.OPENAI_MAX_IMAGES_PER_RUN || '1';
+process.env.INSTAGRAM_AI_BACKGROUNDS = process.env.INSTAGRAM_AI_BACKGROUNDS || 'false';
+process.env.INSTAGRAM_MAX_AI_BACKGROUNDS = process.env.INSTAGRAM_MAX_AI_BACKGROUNDS || '0';
+process.env.ALLOW_RUN_NOW = process.env.ALLOW_RUN_NOW || 'false';
 
 const CFILE = path.join(__dirname, '.vk_post_counter');
 function rdCtr() {
@@ -179,6 +184,37 @@ function requirePatchedBot(file) {
     }
   } else {
     log.push('P10:already');
+  }
+
+  if (!code.includes('OPENAI_IMAGES_ENABLED')) {
+    const P13_OLD = 'if (!OPENAI_API_KEY) return null;';
+    const P13_NEW = "if (!OPENAI_API_KEY || process.env.OPENAI_IMAGES_ENABLED !== 'true') return null;";
+    if (code.includes(P13_OLD)) {
+      code = code.replace(P13_OLD, P13_NEW);
+      log.push('P13:disable-openai-images-by-default');
+    } else {
+      log.push('P13:skip');
+    }
+  } else {
+    log.push('P13:already');
+  }
+
+  if (!code.includes("run-now disabled. Set ALLOW_RUN_NOW=true")) {
+    const P14_OLD = "  if (reqUrl.pathname === '/run-now') {\n";
+    const P14_NEW = "  if (reqUrl.pathname === '/run-now') {\n" +
+      "    if (process.env.ALLOW_RUN_NOW !== 'true') {\n" +
+      "      res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });\n" +
+      "      res.end('run-now disabled. Set ALLOW_RUN_NOW=true to enable it.\\n');\n" +
+      "      return;\n" +
+      "    }\n";
+    if (code.includes(P14_OLD)) {
+      code = code.replace(P14_OLD, P14_NEW);
+      log.push('P14:protect-run-now');
+    } else {
+      log.push('P14:skip');
+    }
+  } else {
+    log.push('P14:already');
   }
 
   const P11_OLD = "    publishVKCycle();\n    res.end('Started: generation + VK publish\\n');";
